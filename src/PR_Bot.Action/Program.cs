@@ -36,7 +36,7 @@ try
             Credentials = new Credentials(inputs.GitHubToken)
         });
 
-    // Core services and built-in static analyzers
+    // Core services
     services.AddPrBotCore();
 
     // Register Gemini AI analyzer if API key is provided
@@ -51,7 +51,7 @@ try
     }
     else
     {
-        Console.WriteLine("ℹ️  No GEMINI_API_KEY detected. Running in static rule-based review mode.");
+        Console.WriteLine("⚠️  No GEMINI_API_KEY detected. Please configure GEMINI_API_KEY to enable AI code review.");
     }
 
     var serviceProvider = services.BuildServiceProvider();

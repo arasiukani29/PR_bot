@@ -79,7 +79,7 @@ public sealed class GitHubService : IGitHubService
         var summaryMarkdown = BuildReviewMarkdown(context, result);
 
         // 1. Post Inline Comments on PR Files Tab (via PullRequestReviewCreate)
-        await PostInlineReviewAsync(context, result, cancellationToken);
+        await PostInlineReviewAsync(context, result, summaryMarkdown, cancellationToken);
 
         // 2. Post / Update the Single Summary Comment on PR Discussion Tab
         await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
@@ -88,9 +88,24 @@ public sealed class GitHubService : IGitHubService
     private async Task PostInlineReviewAsync(
         PullRequestContext context,
         ReviewResult result,
+        string summaryMarkdown,
         CancellationToken cancellationToken)
     {
-        // Collect comments that have valid diff positions
+        // Fetch existing review comments on the PR to prevent duplicate comments across commits
+        IReadOnlyList<PullRequestReviewComment> existingComments = [];
+        try
+        {
+            existingComments = await _client.PullRequest.ReviewComment.GetAll(
+                context.Owner,
+                context.Repo,
+                context.PullRequestNumber);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not fetch existing review comments for deduplication.");
+        }
+
+        // Collect new comments that have valid diff positions and haven't already been reported
         var inlineComments = new List<DraftPullRequestReviewComment>();
 
         foreach (var comment in result.Comments)
@@ -98,19 +113,25 @@ public sealed class GitHubService : IGitHubService
             if (comment.DiffPosition.HasValue && comment.DiffPosition.Value > 0)
             {
                 var body = $"{comment.Body}\n\n<sub>Reported by {comment.AnalyzerName}</sub>";
-                inlineComments.Add(new DraftPullRequestReviewComment(body, comment.FilePath, comment.DiffPosition.Value));
+
+                bool isDuplicate = existingComments.Any(e =>
+                    e.Path.Equals(comment.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                    (e.Body.Contains(comment.Body) || (e.Position == comment.DiffPosition.Value && e.Body.Contains(comment.AnalyzerName))));
+
+                if (!isDuplicate)
+                {
+                    inlineComments.Add(new DraftPullRequestReviewComment(body, comment.FilePath, comment.DiffPosition.Value));
+                }
+                else
+                {
+                    _logger.LogInformation("Skipping already reported comment on {File} (Line {Line})", comment.FilePath, comment.Line);
+                }
             }
         }
 
-        if (inlineComments.Count == 0)
-        {
-            _logger.LogInformation("No inline diff comments to submit.");
-            return;
-        }
-
         _logger.LogInformation(
-            "Submitting {Count} inline review comment(s) to PR #{PrNumber}...",
-            inlineComments.Count, context.PullRequestNumber);
+            "Submitting review to PR #{PrNumber} with {Count} new inline comment(s)...",
+            context.PullRequestNumber, inlineComments.Count);
 
         try
         {
@@ -118,8 +139,8 @@ public sealed class GitHubService : IGitHubService
             {
                 CommitId = context.HeadSha,
                 Event = PullRequestReviewEvent.Comment,
-                Body = "🤖 **PR Bot Inline Review:** Findings attached directly to changed lines.",
-                Comments = inlineComments
+                Body = summaryMarkdown,
+                Comments = inlineComments.Count > 0 ? inlineComments : null
             };
 
             await _client.PullRequest.Review.Create(
@@ -128,11 +149,11 @@ public sealed class GitHubService : IGitHubService
                 context.PullRequestNumber,
                 review);
 
-            _logger.LogInformation("Successfully posted inline review comments.");
+            _logger.LogInformation("Successfully submitted PR review.");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to submit inline review comments batch. Falling back to summary comment.");
+            _logger.LogWarning(ex, "Failed to submit review batch. Falling back to summary comment.");
         }
     }
 
@@ -199,9 +220,9 @@ public sealed class GitHubService : IGitHubService
 
     public static string BuildReviewMarkdown(PullRequestContext context, ReviewResult result)
     {
-        var errorCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Error);
-        var warningCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
-        var infoCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Info);
+        var highCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Error);
+        var mediumCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
+        var lowCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Info);
 
         var sb = new StringBuilder();
 
@@ -212,12 +233,12 @@ public sealed class GitHubService : IGitHubService
         sb.AppendLine($"> Reviewing PR **#{context.PullRequestNumber}**: `{context.Title}` by @{context.Author}");
         sb.AppendLine();
 
-        // Metrics Table
-        sb.AppendLine("| Status | Severity | Count |");
-        sb.AppendLine("|:------:|:---------|:-----:|");
-        sb.AppendLine($"| {(errorCount > 0 ? "❌" : "✅")} | 🚨 Errors | **{errorCount}** |");
-        sb.AppendLine($"| {(warningCount > 0 ? "⚠️" : "✅")} | ⚠️ Warnings | **{warningCount}** |");
-        sb.AppendLine($"| 💡 | 💡 Info & Suggestions | **{infoCount}** |");
+        // Priority Metrics Table
+        sb.AppendLine("| Status | Priority Level | Issues |");
+        sb.AppendLine("|:------:|:---------------|:------:|");
+        sb.AppendLine($"| {(highCount > 0 ? "🔴" : "✅")} | 🔴 **High Priority** (Must Resolve) | **{highCount}** |");
+        sb.AppendLine($"| {(mediumCount > 0 ? "🟡" : "✅")} | 🟡 **Medium Priority** (Should Resolve) | **{mediumCount}** |");
+        sb.AppendLine($"| {(lowCount > 0 ? "🟢" : "✅")} | 🟢 **Low Priority** (Suggestions) | **{lowCount}** |");
         sb.AppendLine();
 
         // Gemini AI Section if available
@@ -229,28 +250,31 @@ public sealed class GitHubService : IGitHubService
             sb.AppendLine();
         }
 
-        // Findings per Analyzer
+        // Findings Grouped by Priority
         if (result.Comments.Count > 0)
         {
-            sb.AppendLine("### 📋 Static & Rule-Based Findings");
+            sb.AppendLine("### 📋 Review Findings (Ordered by Priority)");
             sb.AppendLine();
 
-            var groups = result.Comments.GroupBy(c => c.AnalyzerName);
-            foreach (var group in groups)
+            var priorityGroups = result.Comments
+                .GroupBy(c => c.Severity)
+                .OrderByDescending(g => g.Key); // High (Error) -> Medium (Warning) -> Low (Info)
+
+            foreach (var group in priorityGroups)
             {
+                var (title, icon) = group.Key switch
+                {
+                    AnalyzerSeverity.Error => ("🔴 High Priority Issues (Must Resolve Before Merge)", "🚨"),
+                    AnalyzerSeverity.Warning => ("🟡 Medium Priority Issues (Recommended to Fix)", "⚠️"),
+                    _ => ("🟢 Low Priority Suggestions (Improvements)", "💡")
+                };
+
                 sb.AppendLine($"<details open>");
-                sb.AppendLine($"<summary><b>{group.Key} ({group.Count()})</b></summary>");
+                sb.AppendLine($"<summary><b>{title} ({group.Count()})</b></summary>");
                 sb.AppendLine();
 
                 foreach (var comment in group)
                 {
-                    var icon = comment.Severity switch
-                    {
-                        AnalyzerSeverity.Error => "🚨",
-                        AnalyzerSeverity.Warning => "⚠️",
-                        _ => "💡"
-                    };
-
                     sb.AppendLine($"- {icon} **`{comment.FilePath}`** (Line {comment.Line}): {comment.Body}");
                 }
 
@@ -260,7 +284,7 @@ public sealed class GitHubService : IGitHubService
             }
         }
 
-        if (errorCount == 0 && warningCount == 0 && result.Comments.Count == 0)
+        if (highCount == 0 && mediumCount == 0 && lowCount == 0)
         {
             sb.AppendLine("✨ **No code quality or security issues detected! Clean PR.** 🎉");
             sb.AppendLine();

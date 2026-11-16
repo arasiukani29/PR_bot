@@ -17,6 +17,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
     private static readonly Regex HunkRegex = new(@"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@", RegexOptions.Compiled);
 
     private readonly GeminiApiClient _client;
+
+
     private readonly GeminiOptions _options;
     private readonly ILogger<GeminiReviewAnalyzer> _logger;
 
@@ -32,11 +34,13 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
     public string Name => "GeminiAI";
     public int Order => 50; // Runs after rule-based checks
+    public string? Summary { get; private set; }
 
     public async Task<IReadOnlyList<ReviewComment>> AnalyzeAsync(
         PullRequestContext context,
         CancellationToken cancellationToken = default)
     {
+        Summary = null;
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
         {
             _logger.LogWarning("Gemini API key is not configured. Skipping AI review.");
@@ -90,8 +94,19 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             }
         }
 
-        _logger.LogInformation("Gemini AI review finished. Generated {Count} issue(s).", comments.Count);
-        return comments;
+        if (summaries.Count > 0)
+        {
+            Summary = string.Join("\n\n", summaries);
+        }
+
+        var sortedComments = comments
+            .OrderByDescending(c => c.Severity) // High (Error) -> Medium (Warning) -> Low (Info)
+            .ThenBy(c => c.FilePath)
+            .ThenBy(c => c.Line)
+            .ToList();
+
+        _logger.LogInformation("Gemini AI review finished. Generated {Count} issue(s).", sortedComments.Count);
+        return sortedComments;
     }
 
     public static List<string> BuildDiffChunks(PullRequestContext context, int maxChunkSize)
@@ -164,13 +179,22 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                     var file = finding.TryGetProperty("file", out var fp) ? fp.GetString() ?? "unknown" : "unknown";
                     var line = finding.TryGetProperty("line", out var lp) && lp.TryGetInt32(out var l) ? l : 1;
                     var message = finding.TryGetProperty("message", out var mp) ? mp.GetString() ?? "" : "";
-                    var severityStr = finding.TryGetProperty("severity", out var sp) ? sp.GetString() : "warning";
 
-                    var severity = (severityStr?.ToLowerInvariant()) switch
+                    var priorityStr = finding.TryGetProperty("priority", out var pp) ? pp.GetString() :
+                                      finding.TryGetProperty("severity", out var sp) ? sp.GetString() : "medium";
+
+                    var severity = (priorityStr?.ToLowerInvariant()) switch
                     {
-                        "error" => AnalyzerSeverity.Error,
-                        "info" => AnalyzerSeverity.Info,
+                        "high" or "error" or "critical" => AnalyzerSeverity.Error,
+                        "low" or "info" => AnalyzerSeverity.Info,
                         _ => AnalyzerSeverity.Warning
+                    };
+
+                    var priorityBadge = severity switch
+                    {
+                        AnalyzerSeverity.Error => "🔴 **[HIGH PRIORITY]**",
+                        AnalyzerSeverity.Warning => "🟡 **[MEDIUM PRIORITY]**",
+                        _ => "🟢 **[LOW PRIORITY]**"
                     };
 
                     int? diffPosition = null;
@@ -193,7 +217,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         FilePath = file,
                         Line = line,
                         DiffPosition = diffPosition,
-                        Body = $"🤖 **Gemini AI:** {message}",
+                        Body = $"🤖 **Gemini AI Review** {priorityBadge}\n\n{message}",
                         Severity = severity,
                         AnalyzerName = Name
                     });

@@ -41,6 +41,11 @@ public sealed class ReviewEngine : IReviewEngine
                 var comments = await analyzer.AnalyzeAsync(context, cancellationToken);
                 allComments.AddRange(comments);
 
+                if (!string.IsNullOrWhiteSpace(analyzer.Summary))
+                {
+                    aiSummary = analyzer.Summary;
+                }
+
                 _logger.LogInformation("Analyzer [{Name}] finished with {Count} finding(s).", analyzer.Name, comments.Count);
             }
             catch (Exception ex)

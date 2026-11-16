@@ -80,6 +80,50 @@ public class GeminiReviewAnalyzerTests
     }
 
     [Fact]
+    public void ParseGeminiResponse_ShouldParsePriorityFieldWithBadge()
+    {
+        // Arrange
+        var json = """
+        {
+          "summary": "Review complete.",
+          "findings": [
+            {
+              "file": "src/Security.cs",
+              "line": 10,
+              "priority": "high",
+              "message": "Critical vulnerability found."
+            },
+            {
+              "file": "src/Service.cs",
+              "line": 20,
+              "priority": "medium",
+              "message": "Performance concern."
+            },
+            {
+              "file": "src/Helper.cs",
+              "line": 30,
+              "priority": "low",
+              "message": "Minor suggestion."
+            }
+          ]
+        }
+        """;
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json);
+
+        // Assert
+        summary.Should().Be("Review complete.");
+        comments.Should().HaveCount(3);
+        comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
+        comments[0].Body.Should().Contain("[HIGH PRIORITY]");
+        comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
+        comments[1].Body.Should().Contain("[MEDIUM PRIORITY]");
+        comments[2].Severity.Should().Be(AnalyzerSeverity.Info);
+        comments[2].Body.Should().Contain("[LOW PRIORITY]");
+    }
+
+    [Fact]
     public void BuildDiffChunks_ShouldSplitLargeDiffsAccurately()
     {
         // Arrange

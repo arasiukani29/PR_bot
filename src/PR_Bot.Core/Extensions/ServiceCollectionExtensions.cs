@@ -11,7 +11,7 @@ using PR_Bot.Core.Services;
 public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers the core PR Bot services and all built-in static analyzers.
+    /// Registers the core PR Bot services.
     /// </summary>
     public static IServiceCollection AddPrBotCore(
         this IServiceCollection services,
@@ -24,12 +24,6 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<IGitHubService, GitHubService>();
         services.AddSingleton<IReviewEngine, ReviewEngine>();
-
-        // Register built-in analyzers
-        services.AddSingleton<IReviewAnalyzer, SecurityAnalyzer>();
-        services.AddSingleton<IReviewAnalyzer, StyleAnalyzer>();
-        services.AddSingleton<IReviewAnalyzer, TodoAnalyzer>();
-        services.AddSingleton<IReviewAnalyzer, FileSizeAnalyzer>();
 
         return services;
     }
