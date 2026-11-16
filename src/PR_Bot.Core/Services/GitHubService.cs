@@ -275,7 +275,10 @@ public sealed class GitHubService : IGitHubService
 
                 foreach (var comment in group)
                 {
-                    sb.AppendLine($"- {icon} **`{comment.FilePath}`** (Line {comment.Line}): {comment.Body}");
+                    sb.AppendLine($"#### {icon} `{comment.FilePath}` (Line {comment.Line})");
+                    sb.AppendLine();
+                    sb.AppendLine(comment.Body);
+                    sb.AppendLine();
                 }
 
                 sb.AppendLine();
