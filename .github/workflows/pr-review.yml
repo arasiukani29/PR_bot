@@ -1,4 +1,4 @@
-name: PR Review (Self-Review Dogfooding)
+name: PR Review Bot
 
 on:
   pull_request:
@@ -17,22 +17,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
+      # Uses the action.yml from the root of this repo
       - name: Run PR Bot
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_BASE: ${{ github.event.pull_request.base.ref }}
-          PR_HEAD: ${{ github.event.pull_request.head.ref }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: 'gemini-3.5-flash'
-          FAIL_ON_ERRORS: 'false'
-        run: dotnet run --project src/PR_Bot.Action/PR_Bot.Action.csproj
+        uses: ./
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+          gemini-model: 'gemini-3.5-flash'
+          fail-on-errors: 'false'
