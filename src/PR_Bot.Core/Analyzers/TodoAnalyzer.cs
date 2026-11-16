@@ -29,6 +29,8 @@ public sealed class TodoAnalyzer : IReviewAnalyzer
 
             var lines = file.Patch.Split('\n');
             int currentLine = 0;
+            int diffPosition = 0;
+            bool foundFirstHunk = false;
 
             foreach (var rawLine in lines)
             {
@@ -37,9 +39,14 @@ public sealed class TodoAnalyzer : IReviewAnalyzer
                 var match = HunkRegex.Match(line);
                 if (match.Success)
                 {
+                    foundFirstHunk = true;
                     currentLine = int.Parse(match.Groups[1].Value);
+                    diffPosition++;
                     continue;
                 }
+
+                if (!foundFirstHunk) continue;
+                diffPosition++;
 
                 if (line.StartsWith('+') && !line.StartsWith("+++"))
                 {
@@ -56,6 +63,7 @@ public sealed class TodoAnalyzer : IReviewAnalyzer
                         {
                             FilePath = file.FileName,
                             Line = currentLine,
+                            DiffPosition = diffPosition,
                             Body = $"📝 **{marker}** reminder{detail}. Ensure this is tracked or resolved before merging.",
                             Severity = AnalyzerSeverity.Info,
                             AnalyzerName = Name

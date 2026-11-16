@@ -37,6 +37,8 @@ public sealed class StyleAnalyzer : IReviewAnalyzer
 
             var lines = file.Patch.Split('\n');
             int currentLine = 0;
+            int diffPosition = 0;
+            bool foundFirstHunk = false;
 
             foreach (var rawLine in lines)
             {
@@ -45,9 +47,14 @@ public sealed class StyleAnalyzer : IReviewAnalyzer
                 var match = HunkRegex.Match(line);
                 if (match.Success)
                 {
+                    foundFirstHunk = true;
                     currentLine = int.Parse(match.Groups[1].Value);
+                    diffPosition++;
                     continue;
                 }
+
+                if (!foundFirstHunk) continue;
+                diffPosition++;
 
                 if (line.StartsWith('+') && !line.StartsWith("+++"))
                 {
@@ -60,6 +67,7 @@ public sealed class StyleAnalyzer : IReviewAnalyzer
                         {
                             FilePath = file.FileName,
                             Line = currentLine,
+                            DiffPosition = diffPosition,
                             Body = $"⚠️ Line exceeds {_options.MaxLineLength} characters ({content.Length} characters).",
                             Severity = AnalyzerSeverity.Warning,
                             AnalyzerName = Name
@@ -73,6 +81,7 @@ public sealed class StyleAnalyzer : IReviewAnalyzer
                         {
                             FilePath = file.FileName,
                             Line = currentLine,
+                            DiffPosition = diffPosition,
                             Body = "💡 Trailing whitespace detected.",
                             Severity = AnalyzerSeverity.Info,
                             AnalyzerName = Name
@@ -83,7 +92,7 @@ public sealed class StyleAnalyzer : IReviewAnalyzer
                 }
                 else if (line.StartsWith('-') && !line.StartsWith("---"))
                 {
-                    // Deleted line - do not advance new file line counter
+                    // Deleted line
                 }
                 else if (line.StartsWith(' '))
                 {

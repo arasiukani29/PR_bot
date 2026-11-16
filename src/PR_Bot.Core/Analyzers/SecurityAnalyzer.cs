@@ -59,6 +59,8 @@ public sealed class SecurityAnalyzer : IReviewAnalyzer
 
             var lines = file.Patch.Split('\n');
             int currentLine = 0;
+            int diffPosition = 0;
+            bool foundFirstHunk = false;
 
             foreach (var rawLine in lines)
             {
@@ -67,9 +69,14 @@ public sealed class SecurityAnalyzer : IReviewAnalyzer
                 var match = HunkRegex.Match(line);
                 if (match.Success)
                 {
+                    foundFirstHunk = true;
                     currentLine = int.Parse(match.Groups[1].Value);
+                    diffPosition++;
                     continue;
                 }
+
+                if (!foundFirstHunk) continue;
+                diffPosition++;
 
                 if (line.StartsWith('+') && !line.StartsWith("+++"))
                 {
@@ -83,6 +90,7 @@ public sealed class SecurityAnalyzer : IReviewAnalyzer
                             {
                                 FilePath = file.FileName,
                                 Line = currentLine,
+                                DiffPosition = diffPosition,
                                 Body = message,
                                 Severity = severity,
                                 AnalyzerName = Name

@@ -2,6 +2,7 @@ namespace PR_Bot.Analyzers.Gemini;
 
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PR_Bot.Analyzers.Gemini.Prompts;
@@ -13,6 +14,8 @@ using PR_Bot.Core.Models;
 /// </summary>
 public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 {
+    private static readonly Regex HunkRegex = new(@"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@", RegexOptions.Compiled);
+
     private readonly GeminiApiClient _client;
     private readonly GeminiOptions _options;
     private readonly ILogger<GeminiReviewAnalyzer> _logger;
@@ -72,7 +75,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
                 if (!string.IsNullOrWhiteSpace(jsonResponse))
                 {
-                    var (parsedComments, summary) = ParseGeminiResponse(jsonResponse);
+                    var (parsedComments, summary) = ParseGeminiResponse(jsonResponse, context);
                     comments.AddRange(parsedComments);
 
                     if (!string.IsNullOrWhiteSpace(summary))
@@ -122,14 +125,13 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         return chunks;
     }
 
-    public (List<ReviewComment> Comments, string? Summary) ParseGeminiResponse(string json)
+    public (List<ReviewComment> Comments, string? Summary) ParseGeminiResponse(string json, PullRequestContext? context = null)
     {
         var comments = new List<ReviewComment>();
         string? summary = null;
 
         try
         {
-            // Sanitize potential markdown code fences: ```json ... ```
             var cleanJson = json.Trim();
             if (cleanJson.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
             {
@@ -171,10 +173,26 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         _ => AnalyzerSeverity.Warning
                     };
 
+                    int? diffPosition = null;
+                    if (context != null)
+                    {
+                        var matchingFile = context.ChangedFiles.FirstOrDefault(f =>
+                            f.FileName.Equals(file, StringComparison.OrdinalIgnoreCase) ||
+                            f.FileName.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase) ||
+                            file.EndsWith("/" + f.FileName, StringComparison.OrdinalIgnoreCase));
+
+                        if (matchingFile != null)
+                        {
+                            file = matchingFile.FileName;
+                            diffPosition = FindDiffPosition(matchingFile.Patch, line);
+                        }
+                    }
+
                     comments.Add(new ReviewComment
                     {
                         FilePath = file,
                         Line = line,
+                        DiffPosition = diffPosition,
                         Body = $"🤖 **Gemini AI:** {message}",
                         Severity = severity,
                         AnalyzerName = Name
@@ -188,5 +206,54 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         }
 
         return (comments, summary);
+    }
+
+    public static int? FindDiffPosition(string? patch, int targetLine)
+    {
+        if (string.IsNullOrWhiteSpace(patch)) return null;
+
+        var lines = patch.Split('\n');
+        int currentLine = 0;
+        int diffPosition = 0;
+        bool foundFirstHunk = false;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimEnd('\r');
+            var match = HunkRegex.Match(line);
+            if (match.Success)
+            {
+                foundFirstHunk = true;
+                currentLine = int.Parse(match.Groups[1].Value);
+                diffPosition++;
+                continue;
+            }
+
+            if (!foundFirstHunk) continue;
+            diffPosition++;
+
+            if (line.StartsWith('+') && !line.StartsWith("+++"))
+            {
+                if (currentLine == targetLine)
+                {
+                    return diffPosition;
+                }
+                currentLine++;
+            }
+            else if (line.StartsWith('-') && !line.StartsWith("---"))
+            {
+                // Deleted line in diff
+            }
+            else if (line.StartsWith(' '))
+            {
+                if (currentLine == targetLine)
+                {
+                    return diffPosition;
+                }
+                currentLine++;
+            }
+        }
+
+        return null;
     }
 }

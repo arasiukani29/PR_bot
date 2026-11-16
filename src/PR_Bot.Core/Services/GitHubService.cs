@@ -12,6 +12,8 @@ using PR_Bot.Core.Models;
 /// </summary>
 public sealed class GitHubService : IGitHubService
 {
+    public const string BotCommentMarker = "<!-- universal-pr-bot-review -->";
+
     private readonly IGitHubClient _client;
     private readonly PrBotOptions _options;
     private readonly ILogger<GitHubService> _logger;
@@ -76,22 +78,105 @@ public sealed class GitHubService : IGitHubService
     {
         var summaryMarkdown = BuildReviewMarkdown(context, result);
 
-        _logger.LogInformation(
-            "Posting review comment to PR #{PrNumber} in {Owner}/{Repo}...",
-            context.PullRequestNumber, context.Owner, context.Repo);
+        // 1. Post Inline Comments on PR Files Tab (via PullRequestReviewCreate)
+        await PostInlineReviewAsync(context, result, cancellationToken);
 
-        await _client.Issue.Comment.Create(
-            context.Owner,
-            context.Repo,
-            context.PullRequestNumber,
-            summaryMarkdown);
+        // 2. Post / Update the Single Summary Comment on PR Discussion Tab
+        await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
+    }
+
+    private async Task PostInlineReviewAsync(
+        PullRequestContext context,
+        ReviewResult result,
+        CancellationToken cancellationToken)
+    {
+        // Collect comments that have valid diff positions
+        var inlineComments = new List<DraftPullRequestReviewComment>();
+
+        foreach (var comment in result.Comments)
+        {
+            if (comment.DiffPosition.HasValue && comment.DiffPosition.Value > 0)
+            {
+                var body = $"{comment.Body}\n\n<sub>Reported by {comment.AnalyzerName}</sub>";
+                inlineComments.Add(new DraftPullRequestReviewComment(body, comment.FilePath, comment.DiffPosition.Value));
+            }
+        }
+
+        if (inlineComments.Count == 0)
+        {
+            _logger.LogInformation("No inline diff comments to submit.");
+            return;
+        }
 
         _logger.LogInformation(
-            "Successfully posted review for PR #{PrNumber}: {ErrorCount} errors, {WarningCount} warnings, {InfoCount} suggestions.",
-            context.PullRequestNumber,
-            result.Comments.Count(c => c.Severity == AnalyzerSeverity.Error),
-            result.Comments.Count(c => c.Severity == AnalyzerSeverity.Warning),
-            result.Comments.Count(c => c.Severity == AnalyzerSeverity.Info));
+            "Submitting {Count} inline review comment(s) to PR #{PrNumber}...",
+            inlineComments.Count, context.PullRequestNumber);
+
+        try
+        {
+            var review = new PullRequestReviewCreate
+            {
+                CommitId = context.HeadSha,
+                Event = PullRequestReviewEvent.Comment,
+                Body = "🤖 **PR Bot Inline Review:** Findings attached directly to changed lines.",
+                Comments = inlineComments
+            };
+
+            await _client.PullRequest.Review.Create(
+                context.Owner,
+                context.Repo,
+                context.PullRequestNumber,
+                review);
+
+            _logger.LogInformation("Successfully posted inline review comments.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to submit inline review comments batch. Falling back to summary comment.");
+        }
+    }
+
+    private async Task UpsertSummaryCommentAsync(
+        PullRequestContext context,
+        string summaryMarkdown,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Check existing comments for our unique bot marker
+            var existingComments = await _client.Issue.Comment.GetAllForIssue(
+                context.Owner,
+                context.Repo,
+                context.PullRequestNumber);
+
+            var previousBotComment = existingComments.FirstOrDefault(c =>
+                c.Body != null && c.Body.Contains(BotCommentMarker));
+
+            if (previousBotComment != null)
+            {
+                _logger.LogInformation("Updating existing PR review comment ID {Id}...", previousBotComment.Id);
+                await _client.Issue.Comment.Update(
+                    context.Owner,
+                    context.Repo,
+                    previousBotComment.Id,
+                    summaryMarkdown);
+                _logger.LogInformation("Updated existing review comment.");
+            }
+            else
+            {
+                _logger.LogInformation("Posting new PR review summary comment...");
+                await _client.Issue.Comment.Create(
+                    context.Owner,
+                    context.Repo,
+                    context.PullRequestNumber,
+                    summaryMarkdown);
+                _logger.LogInformation("Created new review summary comment.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to post or update summary comment on PR #{PrNumber}", context.PullRequestNumber);
+        }
     }
 
     private bool IsIgnored(string fileName)
@@ -120,6 +205,8 @@ public sealed class GitHubService : IGitHubService
 
         var sb = new StringBuilder();
 
+        // Hidden marker to identify bot comments and update them on re-runs
+        sb.AppendLine(BotCommentMarker);
         sb.AppendLine("## 🤖 Universal PR Review Bot Summary");
         sb.AppendLine();
         sb.AppendLine($"> Reviewing PR **#{context.PullRequestNumber}**: `{context.Title}` by @{context.Author}");

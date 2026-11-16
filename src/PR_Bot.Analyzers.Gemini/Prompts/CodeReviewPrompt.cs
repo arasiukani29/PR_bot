@@ -15,11 +15,12 @@ public static class CodeReviewPrompt
         3. Performance pitfalls (unbounded collections, memory leaks, N+1 queries, synchronous blocking)
         4. Architecture & Clean Code (SOLID violations, leaky abstractions, missing error handling)
 
-        Rules:
+        CRITICAL REVIEW RULES:
+        - EXHAUSTIVE SINGLE-PASS: You must identify and report ALL issues across ALL files in this single response. Do NOT stop after finding 1 or 2 issues. Inspect every single added line in every file. Never report issues incrementally. If there are 5 problems, report all 5 immediately.
         - Only review ADDED lines (lines starting with '+' in the unified diff).
         - Ignore deleted lines and unmodified context lines.
         - Do not nitpick trivial formatting (e.g. whitespace, indentation) unless it impacts correctness.
-        - For every issue, specify the exact file path, approximate line number, severity ("error", "warning", or "info"), and a clear explanation with suggested code fix.
+        - For every issue, specify the exact file path matching the diff, the exact line number of the added line in the new file, severity ("error", "warning", or "info"), and a clear explanation with suggested code fix.
         - If the code is good, return an empty findings list and a positive summary.
 
         You MUST respond with valid JSON adhering to this exact schema:
@@ -47,7 +48,7 @@ public static class CodeReviewPrompt
             {diffChunk}
             ```
 
-            Review the added code in this diff and return the JSON review.
+            Review the added code in this diff and return ALL findings in the specified JSON format.
             """;
     }
 }
