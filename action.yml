@@ -1,0 +1,54 @@
+name: 'Universal PR Review Bot'
+description: 'Automated PR code review bot with static security/style analyzers + Google Gemini AI.'
+author: 'PR_Bot'
+
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
+
+inputs:
+  github-token:
+    description: 'GitHub Token for authentication and PR commenting.'
+    required: true
+    default: ${{ github.token }}
+  gemini-api-key:
+    description: 'Google Gemini API key for AI-powered code reviews (optional).'
+    required: false
+    default: ''
+  gemini-model:
+    description: 'Gemini model to use.'
+    required: false
+    default: 'gemini-2.5-flash'
+  dotnet-version:
+    description: '.NET SDK version to install on runner.'
+    required: false
+    default: '10.0.x'
+  fail-on-errors:
+    description: 'Fail the GitHub workflow check if critical errors are detected.'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Run PR Bot
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        PR_BASE: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD: ${{ github.event.pull_request.head.ref }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        GEMINI_MODEL: ${{ inputs.gemini-model }}
+        FAIL_ON_ERRORS: ${{ inputs.fail-on-errors }}
+      run: |
+        dotnet run --project "${{ github.action_path }}/src/PR_Bot.Action/PR_Bot.Action.csproj"

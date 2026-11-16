@@ -1,0 +1,26 @@
+namespace PR_Bot.Core.Analyzers;
+
+using PR_Bot.Core.Models;
+
+/// <summary>
+/// Defines the plugin contract for custom or built-in PR review analyzers.
+/// </summary>
+public interface IReviewAnalyzer
+{
+    /// <summary>
+    /// Friendly display name for the analyzer.
+    /// </summary>
+    string Name { get; }
+
+    /// <summary>
+    /// Execution order priority (lower numbers execute first).
+    /// </summary>
+    int Order => 100;
+
+    /// <summary>
+    /// Analyzes the PR context and returns findings.
+    /// </summary>
+    Task<IReadOnlyList<ReviewComment>> AnalyzeAsync(
+        PullRequestContext context,
+        CancellationToken cancellationToken = default);
+}

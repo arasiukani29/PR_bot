@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PR_Bot.Action/PR_Bot.Action.csproj" />
+    <Project Path="src/PR_Bot.Analyzers.Gemini/PR_Bot.Analyzers.Gemini.csproj" />
+    <Project Path="src/PR_Bot.Core/PR_Bot.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PR_Bot.Core.Tests/PR_Bot.Core.Tests.csproj" />
+  </Folder>
+</Solution>

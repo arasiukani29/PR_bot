@@ -1,0 +1,52 @@
+## Build Results and Artifacts
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]uild/
+bld/
+[Bb]in/
+[Oo]bj/
+TestResults/
+[Tt]est[Rr]esult*/
+
+## Visual Studio & JetBrains Cache
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+*.pidb
+*.booproj
+
+## Secrets & Local Configuration
+*.env
+*.env.*
+*.pem
+*.key
+*.pfx
+*.cer
+appsettings*.Development.json
+secrets.json
+local.settings.json
+
+## OS Generated Files
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+.DS_Store
+.Spotlight-V100
+.Trashes
+
+## NuGet & Package Caches
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+project.lock.json
+project.assets.json
