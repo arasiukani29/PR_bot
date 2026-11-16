@@ -7,7 +7,7 @@ A reusable, serverless, automated Pull Request review bot built in **C# (.NET 10
 ## 🌟 Features
 
 - **🌐 Universal Reusability:** Call it from any repo using a simple GitHub Actions workflow file (`uses: YOUR_USERNAME/PR_Bot@main`).
-- **🧠 AI-Powered Code Review:** Powered by **Google Gemini** (`gemini-2.5-flash` or any Gemini model) to detect logic bugs, unhandled edge cases, performance bottlenecks, and design anti-patterns.
+- **🧠 AI-Powered Code Review:** Powered by **Google Gemini** (`gemini-3.5-flash` or any Gemini model) to detect logic bugs, unhandled edge cases, performance bottlenecks, and design anti-patterns.
 - **🛡️ Built-in Security Analysis:** Scans added lines for leaked private keys, API keys, tokens, hardcoded passwords, plaintext DB connection strings, and SSL verification bypasses.
 - **🎨 Code Style & Quality Rules:** Enforces maximum line lengths, detects trailing whitespace, and alerts on leftover technical debt (`TODO`, `FIXME`, `HACK`).
 - **📊 Scope Awareness:** Warns when pull requests are too large or single files add excessive lines of code.

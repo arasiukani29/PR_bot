@@ -33,6 +33,6 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: 'gemini-2.5-flash'
+          GEMINI_MODEL: 'gemini-3.5-flash'
           FAIL_ON_ERRORS: 'false'
         run: dotnet run --project src/PR_Bot.Action/PR_Bot.Action.csproj

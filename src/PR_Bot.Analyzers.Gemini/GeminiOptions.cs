@@ -13,9 +13,9 @@ public sealed class GeminiOptions
     public string? ApiKey { get; set; }
 
     /// <summary>
-    /// Model name to use (default: gemini-2.5-flash).
+    /// Model name to use (default: gemini-3.5-flash).
     /// </summary>
-    public string Model { get; set; } = "gemini-2.5-flash";
+    public string Model { get; set; } = "gemini-3.5-flash";
 
     /// <summary>
     /// Sampling temperature (lower = more deterministic for code analysis).

@@ -46,7 +46,7 @@ public sealed class ActionInputs
         HeadSha = Environment.GetEnvironmentVariable("PR_HEAD_SHA") ?? "HEAD";
 
         GeminiApiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
-        GeminiModel = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-2.5-flash";
+        GeminiModel = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-3.5-flash";
 
         var failOnErrStr = Environment.GetEnvironmentVariable("FAIL_ON_ERRORS") ?? "false";
         FailOnErrors = bool.TryParse(failOnErrStr, out var fail) && fail;
