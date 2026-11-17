@@ -7,10 +7,10 @@ A reusable, serverless, automated Pull Request review bot built in **C# (.NET 10
 ## 🌟 Features
 
 - **🌐 Universal Reusability:** Call it from any repo using a simple GitHub Actions workflow file (`uses: YOUR_USERNAME/PR_Bot@main`).
-- **🧠 AI-Powered Code Review:** Powered by **Google Gemini** (`gemini-3.5-flash` or any Gemini model) to detect logic bugs, unhandled edge cases, performance bottlenecks, and design anti-patterns.
-- **🛡️ Built-in Security Analysis:** Scans added lines for leaked private keys, API keys, tokens, hardcoded passwords, plaintext DB connection strings, and SSL verification bypasses.
-- **🎨 Code Style & Quality Rules:** Enforces maximum line lengths, detects trailing whitespace, and alerts on leftover technical debt (`TODO`, `FIXME`, `HACK`).
-- **📊 Scope Awareness:** Warns when pull requests are too large or single files add excessive lines of code.
+- **🧠 AI-Powered Code Review:** Powered by **Google Gemini** (`gemini-3.5-flash` or any Gemini model) to detect logic bugs, unhandled edge cases, security hazards, and performance bottlenecks.
+- **🩺 Code Health Score (0-100%):** Automatically computes an objective PR Health Score with visual progress bars and letter grades (`A`, `B`, `C`, `F`).
+- **🎯 Priority-Based Findings:** Findings are classified into 🔴 **High Priority** (blocking), 🟡 **Medium Priority** (recommended), and 🟢 **Low Priority** (suggestions).
+- **💬 Dual Comments (Overall + Inline):** Posts a comprehensive overview on the PR conversation tab plus inline diff comments directly on affected lines.
 - **⚡ Zero Infrastructure:** Runs on GitHub-hosted runners using the built-in `GITHUB_TOKEN`. No webhooks to configure, no Docker containers to maintain, no cloud bills.
 
 ---
@@ -93,15 +93,13 @@ flowchart TD
 
 ---
 
-## 📋 Built-in Analyzers
+## 📋 Review Architecture & Priority System
 
-| Analyzer | Order | Severity | What it checks |
-|---|:---:|:---:|---|
-| **SecurityAnalyzer** | 5 | 🚨 Error / ⚠️ Warning | Private keys (`RSA`, `EC`, `OPENSSH`), hardcoded tokens/passwords, DB connection strings, SSL certificate validation bypasses, dynamic `eval`/`exec`. |
-| **StyleAnalyzer** | 10 | ⚠️ Warning / 💡 Info | Lines exceeding configured length (default 120 chars), trailing whitespace. |
-| **TodoAnalyzer** | 20 | 💡 Info | Leftover `TODO`, `FIXME`, `HACK`, `XXX`, or `WORKAROUND` markers in added lines. |
-| **FileSizeAnalyzer** | 30 | ⚠️ Warning / 💡 Info | PRs with too many changed files (>50), single files with excessive additions (>500 lines), or large total changesets (>1000 lines). |
-| **GeminiAI** | 50 | 🚨 Error / ⚠️ Warning / 💡 Info | AI evaluation of runtime defects, edge cases, algorithmic efficiency, and architectural best practices. |
+| Priority | Impact on Health Score | Scope | Examples |
+|---|:---:|---|---|
+| 🔴 **High Priority** | -25 pts | Must resolve before merge | Critical bugs, SQL/Command injection, exposed secrets/API keys, memory leaks, null reference hazards, auth gaps. |
+| 🟡 **Medium Priority** | -10 pts | Recommended to fix | Architectural flaws, N+1 database queries, blocking synchronous calls, unhandled edge cases, missing error handling. |
+| 🟢 **Low Priority** | -3 pts | Optional improvement | Non-critical performance optimizations, minor code smells, conventions, readability enhancements. |
 
 ---
 

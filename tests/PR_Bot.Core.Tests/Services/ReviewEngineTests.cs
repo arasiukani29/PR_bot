@@ -89,4 +89,24 @@ public class ReviewEngineTests
         result.Comments.Should().Contain(c => c.AnalyzerName == "Healthy");
         result.Comments.Should().Contain(c => c.AnalyzerName == "Faulty" && c.Body.Contains("Simulated unexpected crash"));
     }
+
+    [Theory]
+    [InlineData(0, 0, 0, 100, "A (Excellent)")]
+    [InlineData(1, 0, 0, 75, "B (Good)")]
+    [InlineData(1, 1, 0, 65, "C (Needs Attention)")]
+    [InlineData(4, 0, 0, 0, "F (Critical Action Required)")]
+    public void ReviewResult_HealthScore_CalculatesAccurately(
+        int highCount, int mediumCount, int lowCount, int expectedScore, string expectedGrade)
+    {
+        var comments = new List<ReviewComment>();
+        for (int i = 0; i < highCount; i++) comments.Add(new ReviewComment { FilePath = "f.cs", Line = 1, Body = "err", Severity = AnalyzerSeverity.Error, AnalyzerName = "test" });
+        for (int i = 0; i < mediumCount; i++) comments.Add(new ReviewComment { FilePath = "f.cs", Line = 1, Body = "warn", Severity = AnalyzerSeverity.Warning, AnalyzerName = "test" });
+        for (int i = 0; i < lowCount; i++) comments.Add(new ReviewComment { FilePath = "f.cs", Line = 1, Body = "info", Severity = AnalyzerSeverity.Info, AnalyzerName = "test" });
+
+        var result = new ReviewResult { Comments = comments };
+
+        result.HealthScore.Should().Be(expectedScore);
+        result.HealthGrade.Should().Be(expectedGrade);
+        result.HealthProgressBar.Should().Contain($"{expectedScore}%");
+    }
 }

@@ -233,6 +233,21 @@ public sealed class GitHubService : IGitHubService
         sb.AppendLine($"> Reviewing PR **#{context.PullRequestNumber}**: `{context.Title}` by @{context.Author}");
         sb.AppendLine();
 
+        // Code Health Score Section
+        var healthIcon = result.HealthScore switch
+        {
+            >= 90 => "🟢",
+            >= 75 => "🟡",
+            >= 50 => "🟠",
+            _ => "🔴"
+        };
+
+        sb.AppendLine($"### {healthIcon} Code Health Score: **{result.HealthScore}/100** — Grade: **{result.HealthGrade}**");
+        sb.AppendLine("```text");
+        sb.AppendLine(result.HealthProgressBar);
+        sb.AppendLine("```");
+        sb.AppendLine();
+
         // Priority Metrics Table
         sb.AppendLine("| Status | Priority Level | Issues |");
         sb.AppendLine("|:------:|:---------------|:------:|");

@@ -92,7 +92,9 @@ try
 
     Console.WriteLine("\n==================================================");
     Console.WriteLine("✅ PR Review completed successfully!");
-    Console.WriteLine($"Findings: {reviewResult.Comments.Count} total ({reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Error)} errors, {reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Warning)} warnings, {reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Info)} info)");
+    Console.WriteLine($"🩺 Code Health Score: {reviewResult.HealthScore}/100 [{reviewResult.HealthGrade}]");
+    Console.WriteLine(reviewResult.HealthProgressBar);
+    Console.WriteLine($"Findings: {reviewResult.Comments.Count} total ({reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Error)} high, {reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Warning)} medium, {reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Info)} low)");
     Console.WriteLine("==================================================");
 
     if (inputs.FailOnErrors && reviewResult.HasErrors)
