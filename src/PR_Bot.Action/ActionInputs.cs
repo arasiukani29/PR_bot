@@ -12,6 +12,7 @@ public sealed class ActionInputs
     public string Repo { get; }
     public int PullRequestNumber { get; }
     public string Title { get; }
+    public string? Description { get; }
     public string Author { get; }
     public string BaseBranch { get; }
     public string HeadBranch { get; }
@@ -42,6 +43,7 @@ public sealed class ActionInputs
         PullRequestNumber = prNumber;
 
         Title = Environment.GetEnvironmentVariable("PR_TITLE") ?? $"PR #{prNumber}";
+        Description = Environment.GetEnvironmentVariable("PR_DESCRIPTION");
         Author = Environment.GetEnvironmentVariable("PR_AUTHOR") ?? "unknown";
         BaseBranch = Environment.GetEnvironmentVariable("PR_BASE") ?? "main";
         HeadBranch = Environment.GetEnvironmentVariable("PR_HEAD") ?? "feature";

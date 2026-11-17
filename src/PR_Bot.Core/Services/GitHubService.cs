@@ -36,6 +36,23 @@ public sealed class GitHubService : IGitHubService
             "Fetching changed files for PR #{PrNumber} in {Owner}/{Repo}...",
             context.PullRequestNumber, context.Owner, context.Repo);
 
+        if (string.IsNullOrWhiteSpace(context.Description))
+        {
+            try
+            {
+                var pr = await _client.PullRequest.Get(context.Owner, context.Repo, context.PullRequestNumber);
+                context.Description = pr.Body;
+                if (!string.IsNullOrWhiteSpace(context.Description))
+                {
+                    _logger.LogInformation("Fetched PR description ({Length} chars) for PR #{PrNumber}.", context.Description.Length, context.PullRequestNumber);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not fetch PR description for PR #{PrNumber}.", context.PullRequestNumber);
+            }
+        }
+
         var files = await _client.PullRequest.Files(
             context.Owner,
             context.Repo,
@@ -51,6 +68,37 @@ public sealed class GitHubService : IGitHubService
                 continue;
             }
 
+            string? fullContent = null;
+            if (!file.Status.Equals("removed", StringComparison.OrdinalIgnoreCase))
+            {
+                // Attempt 1: Read directly from local disk (available if runner checked out the repository)
+                if (File.Exists(file.FileName))
+                {
+                    try
+                    {
+                        fullContent = await File.ReadAllTextAsync(file.FileName, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not read local file {FileName} for full context.", file.FileName);
+                    }
+                }
+
+                // Attempt 2: Fallback to Octokit GitHub API if not found locally
+                if (fullContent == null && !string.IsNullOrWhiteSpace(context.HeadSha) && !context.HeadSha.Equals("HEAD", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var bytes = await _client.Repository.Content.GetRawContentByRef(context.Owner, context.Repo, file.FileName, context.HeadSha);
+                        fullContent = Encoding.UTF8.GetString(bytes);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not fetch remote raw content from GitHub for {FileName}.", file.FileName);
+                    }
+                }
+            }
+
             changedFiles.Add(new PullRequestFileChange
             {
                 FileName = file.FileName,
@@ -58,7 +106,8 @@ public sealed class GitHubService : IGitHubService
                 Additions = file.Additions,
                 Deletions = file.Deletions,
                 Changes = file.Changes,
-                Patch = file.Patch
+                Patch = file.Patch,
+                FullContent = fullContent
             });
         }
 

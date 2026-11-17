@@ -57,4 +57,15 @@ public sealed class GeminiOptions
     /// Maximum character length per diff chunk sent to Gemini.
     /// </summary>
     public int MaxChunkCharacters { get; set; } = 15000;
+
+    /// <summary>
+    /// Maximum line count in a file to include the full file as context.
+    /// Files exceeding this line count will switch to windowed context (header + surrounding hunk lines).
+    /// </summary>
+    public int MaxFullFileLines { get; set; } = 600;
+
+    /// <summary>
+    /// Number of context lines before and after each changed hunk when a file is too large for full file context.
+    /// </summary>
+    public int SurroundingContextLines { get; set; } = 25;
 }

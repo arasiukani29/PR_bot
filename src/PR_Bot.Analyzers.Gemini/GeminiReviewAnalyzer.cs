@@ -47,7 +47,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             return [];
         }
 
-        var chunks = BuildDiffChunks(context, _options.MaxChunkCharacters);
+        var chunks = BuildDiffChunks(context, _options.MaxChunkCharacters, _options);
         if (chunks.Count == 0)
         {
             _logger.LogInformation("No modified files with patch diffs to review.");
@@ -77,7 +77,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             var chunk = chunks[i];
             _logger.LogInformation("Analyzing chunk {Index}/{Total} ({Length} chars)...", i + 1, chunks.Count, chunk.Length);
 
-            var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, chunk);
+            var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, context.Description, chunk);
             string? jsonResponse = null;
 
             var modelQueue = new List<string> { currentWorkingModel };
@@ -155,8 +155,14 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
     public static List<string> BuildDiffChunks(PullRequestContext context, int maxChunkSize)
     {
+        return BuildDiffChunks(context, maxChunkSize, options: null);
+    }
+
+    public static List<string> BuildDiffChunks(PullRequestContext context, int maxChunkSize, GeminiOptions? options)
+    {
         var chunks = new List<string>();
         var currentChunk = new StringBuilder();
+        var opts = options ?? new GeminiOptions();
 
         foreach (var file in context.ChangedFiles)
         {
@@ -165,15 +171,21 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 continue;
             }
 
-            var fileHeader = $"--- a/{file.FileName}\n+++ b/{file.FileName}\n{file.Patch}\n\n";
+            var filePayload = BuildFileContext(file, opts) + "\n\n";
 
-            if (currentChunk.Length + fileHeader.Length > maxChunkSize && currentChunk.Length > 0)
+            if (currentChunk.Length + filePayload.Length > maxChunkSize && currentChunk.Length > 0)
             {
                 chunks.Add(currentChunk.ToString());
                 currentChunk.Clear();
             }
 
-            currentChunk.Append(fileHeader);
+            if (filePayload.Length > maxChunkSize && currentChunk.Length == 0)
+            {
+                chunks.Add(filePayload);
+                continue;
+            }
+
+            currentChunk.Append(filePayload);
         }
 
         if (currentChunk.Length > 0)
@@ -182,6 +194,114 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         }
 
         return chunks;
+    }
+
+    public static string BuildFileContext(PullRequestFileChange file, GeminiOptions? options = null)
+    {
+        var opts = options ?? new GeminiOptions();
+        var addedLines = file.GetAddedOrModifiedLines();
+        var addedLinesStr = addedLines.Count > 0 ? string.Join(", ", addedLines) : "None (deleted or non-code change)";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"--- File: {file.FileName} (Status: {file.Status}) ---");
+        sb.AppendLine($"CHANGED / ADDED LINES TO REVIEW: [{addedLinesStr}]");
+
+        if (string.IsNullOrWhiteSpace(file.FullContent))
+        {
+            // Diff-only fallback when full content is unavailable
+            sb.AppendLine("GIT UNIFIED DIFF:");
+            sb.AppendLine("```diff");
+            sb.AppendLine($"--- a/{file.FileName}");
+            sb.AppendLine($"+++ b/{file.FileName}");
+            sb.AppendLine(file.Patch);
+            sb.AppendLine("```");
+            return sb.ToString();
+        }
+
+        var lines = file.FullContent.Split('\n');
+        int totalLines = lines.Length;
+
+        if (totalLines <= opts.MaxFullFileLines)
+        {
+            // Small/Medium file: Include full file context with 1-based line numbers
+            sb.AppendLine($"FULL FILE CONTEXT ({totalLines} lines - READ-ONLY REFERENCE):");
+            sb.AppendLine("```");
+            for (int i = 0; i < totalLines; i++)
+            {
+                sb.AppendLine($"{i + 1,4} | {lines[i].TrimEnd('\r')}");
+            }
+            sb.AppendLine("```");
+        }
+        else
+        {
+            // Large file: Windowed context (imports/headers + surrounding hunk slices)
+            sb.AppendLine($"WINDOWED FILE CONTEXT ({totalLines} lines - Large file, showing header & surrounding context):");
+            sb.AppendLine("```");
+
+            // Calculate intervals of lines to include (1-based)
+            var intervals = new List<(int Start, int End)>();
+
+            // Always include top header (first 30 lines or up to totalLines)
+            int headerLines = Math.Min(30, totalLines);
+            intervals.Add((1, headerLines));
+
+            // Include surrounding context for each changed line
+            foreach (var lineNum in addedLines)
+            {
+                int start = Math.Max(1, lineNum - opts.SurroundingContextLines);
+                int end = Math.Min(totalLines, lineNum + opts.SurroundingContextLines);
+                intervals.Add((start, end));
+            }
+
+            // Merge overlapping intervals
+            var merged = new List<(int Start, int End)>();
+            foreach (var interval in intervals.OrderBy(i => i.Start))
+            {
+                if (merged.Count == 0 || merged[^1].End < interval.Start - 1)
+                {
+                    merged.Add(interval);
+                }
+                else
+                {
+                    var last = merged[^1];
+                    merged[^1] = (last.Start, Math.Max(last.End, interval.End));
+                }
+            }
+
+            // Output lines with gap markers
+            int previousEnd = 0;
+            foreach (var (start, end) in merged)
+            {
+                if (previousEnd > 0 && start > previousEnd + 1)
+                {
+                    int omittedCount = start - previousEnd - 1;
+                    sb.AppendLine($"     | // ... [{omittedCount} lines omitted (lines {previousEnd + 1} to {start - 1})] ...");
+                }
+
+                for (int i = start; i <= end; i++)
+                {
+                    sb.AppendLine($"{i,4} | {lines[i - 1].TrimEnd('\r')}");
+                }
+
+                previousEnd = end;
+            }
+
+            if (previousEnd < totalLines)
+            {
+                sb.AppendLine($"     | // ... [{totalLines - previousEnd} lines omitted to EOF] ...");
+            }
+
+            sb.AppendLine("```");
+        }
+
+        sb.AppendLine("GIT UNIFIED DIFF:");
+        sb.AppendLine("```diff");
+        sb.AppendLine($"--- a/{file.FileName}");
+        sb.AppendLine($"+++ b/{file.FileName}");
+        sb.AppendLine(file.Patch);
+        sb.AppendLine("```");
+
+        return sb.ToString();
     }
 
     public (List<ReviewComment> Comments, string? Summary) ParseGeminiResponse(string json, PullRequestContext? context = null)

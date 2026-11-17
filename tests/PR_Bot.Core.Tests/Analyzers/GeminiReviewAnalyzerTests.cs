@@ -168,4 +168,141 @@ public class GeminiReviewAnalyzerTests
         chunks[0].Should().Contain("File1.cs");
         chunks[1].Should().Contain("File2.cs");
     }
+
+    [Fact]
+    public void BuildUserMessage_ShouldIncludePrDescriptionAndFirstPassInstructions()
+    {
+        // Arrange
+        var title = "Add payment integration";
+        var author = "developer1";
+        var description = "Please review specifically for concurrency safety and token leaks.";
+        var diff = "some diff payload";
+
+        // Act
+        var message = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.BuildUserMessage(title, author, description, diff);
+
+        // Assert
+        message.Should().Contain("Add payment integration");
+        message.Should().Contain("@developer1");
+        message.Should().Contain("Please review specifically for concurrency safety and token leaks.");
+        message.Should().Contain("Return ALL findings on this first review pass");
+    }
+
+    [Fact]
+    public void BuildFileContext_SmallFile_ShouldIncludeNumberedFullFileContext()
+    {
+        // Arrange
+        var patch = """
+            @@ -10,3 +10,4 @@
+             var x = 1;
+            +var y = 2;
+             return x + y;
+            """;
+
+        var fullContent = string.Join("\n", Enumerable.Range(1, 50).Select(i => $"// Line {i}"));
+
+        var file = new PullRequestFileChange
+        {
+            FileName = "src/Calculator.cs",
+            Status = "modified",
+            Additions = 1,
+            Deletions = 0,
+            Changes = 1,
+            Patch = patch,
+            FullContent = fullContent
+        };
+
+        var options = new GeminiOptions { MaxFullFileLines = 100 };
+
+        // Act
+        var contextStr = GeminiReviewAnalyzer.BuildFileContext(file, options);
+
+        // Assert
+        contextStr.Should().Contain("FULL FILE CONTEXT (50 lines - READ-ONLY REFERENCE)");
+        contextStr.Should().Contain("CHANGED / ADDED LINES TO REVIEW: [11]");
+        contextStr.Should().Contain("   1 | // Line 1");
+        contextStr.Should().Contain("  50 | // Line 50");
+        contextStr.Should().Contain("GIT UNIFIED DIFF:");
+    }
+
+    [Fact]
+    public void BuildFileContext_LargeFile_ShouldIncludeWindowedContextWithGapMarkers()
+    {
+        // Arrange (800 lines file, change at line 500)
+        var patch = """
+            @@ -500,2 +500,3 @@
+             var a = 10;
+            +var b = 20;
+             var c = 30;
+            """;
+
+        var fullContent = string.Join("\n", Enumerable.Range(1, 800).Select(i => $"public int Field{i} = {i};"));
+
+        var file = new PullRequestFileChange
+        {
+            FileName = "src/LargeService.cs",
+            Status = "modified",
+            Additions = 1,
+            Deletions = 0,
+            Changes = 1,
+            Patch = patch,
+            FullContent = fullContent
+        };
+
+        var options = new GeminiOptions
+        {
+            MaxFullFileLines = 100, // force windowing
+            SurroundingContextLines = 5
+        };
+
+        // Act
+        var contextStr = GeminiReviewAnalyzer.BuildFileContext(file, options);
+
+        // Assert
+        contextStr.Should().Contain("WINDOWED FILE CONTEXT (800 lines - Large file");
+        contextStr.Should().Contain("CHANGED / ADDED LINES TO REVIEW: [501]");
+        // Should include file header (lines 1..30)
+        contextStr.Should().Contain("   1 | public int Field1");
+        contextStr.Should().Contain("  30 | public int Field30");
+        // Should contain gap omission marker
+        contextStr.Should().Contain("lines omitted");
+        // Should contain surrounding window around line 501 (e.g. line 500..506)
+        contextStr.Should().Contain(" 501 | public int Field501");
+    }
+
+    [Fact]
+    public void GetAddedOrModifiedLines_ShouldExtractAccurateLineNumbersFromPatch()
+    {
+        // Arrange
+        var patch = """
+            @@ -1,3 +1,5 @@
+             int a = 1;
+            +int b = 2;
+            +int c = 3;
+             int d = 4;
+            @@ -20,2 +22,3 @@
+             int x = 10;
+            +int y = 20;
+            """;
+
+        var file = new PullRequestFileChange
+        {
+            FileName = "Test.cs",
+            Status = "modified",
+            Additions = 3,
+            Deletions = 0,
+            Changes = 3,
+            Patch = patch
+        };
+
+        // Act
+        var addedLines = file.GetAddedOrModifiedLines();
+
+        // Assert
+        // In first hunk: +new starts at 1. Line 1 is context (' int a = 1').
+        // Line 2 is '+int b = 2'. Line 3 is '+int c = 3'.
+        // In second hunk: +new starts at 22. Line 22 is context (' int x = 10').
+        // Line 23 is '+int y = 20'.
+        addedLines.Should().Equal(2, 3, 23);
+    }
 }

@@ -66,6 +66,7 @@ try
         Repo = inputs.Repo,
         PullRequestNumber = inputs.PullRequestNumber,
         Title = inputs.Title,
+        Description = inputs.Description,
         Author = inputs.Author,
         BaseBranch = inputs.BaseBranch,
         HeadBranch = inputs.HeadBranch,
