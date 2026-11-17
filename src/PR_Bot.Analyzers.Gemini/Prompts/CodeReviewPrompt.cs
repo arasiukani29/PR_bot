@@ -24,17 +24,17 @@ public static class CodeReviewPrompt
         Classify every finding into one of three strict levels:
         - "high" (Blocker):
           * Security flaws (OWASP Top 10, SQL injection, XSS, exposed secrets/API keys, auth gaps, insecure deserialization).
-          * Crash risks, NullReferenceExceptions, unhandled edge cases in core domain logic.
+          * Crash risks, null pointer / null reference exceptions, unhandled edge cases in core domain logic.
           * Data loss, concurrency races, improper transaction rollbacks.
-          * Resource leaks (unclosed streams, missing Dispose/await using).
-          * Async hazards (strictly flag .Result, .Wait(), or async void which cause thread-pool deadlocks).
+          * Resource leaks (unclosed streams, unreleased database connections, missing dispose/cleanup).
+          * Async/concurrency hazards (blocking calls like .Result/.Wait(), unawaited promises/tasks, thread-pool deadlocks).
         - "medium" (Important):
           * Performance pitfalls (N+1 queries, unbounded in-memory collections, inefficient loops).
           * Missing validations on API inputs or business boundary rules.
           * Sensitive data or PII (passwords, tokens, customer data) written to log files in plain text.
           * Leaky abstractions, breaking SOLID principles, error handling that swallows exceptions.
         - "low" (Advisory / Mentorship):
-          * Idiomatic modern C# patterns (e.g. pattern matching, LINQ optimization, null-coalescing).
+          * Idiomatic language patterns and modern features for the language being reviewed (e.g. PEP 8/type hints in Python, LINQ in C#, hooks in React, idiomatic error handling in Go).
           * Readability and maintainability suggestions.
           * Recommending 1-2 edge-case unit test scenarios for newly introduced complex logic.
 
@@ -48,10 +48,10 @@ public static class CodeReviewPrompt
           "summary": "A 2-3 sentence executive summary from the Team Lead summarizing the changes, overall quality, and readiness for merge.",
           "findings": [
             {
-              "file": "path/to/file.cs",
+              "file": "path/to/file.ext",
               "line": 42,
               "priority": "high|medium|low",
-              "message": "Clear explanation of the problem, failure impact, and a concrete code fix:\n\n```csharp\n// Suggested fix\n```"
+              "message": "Clear explanation of the problem, failure impact, and a concrete code fix:\n\n```language\n// Suggested fix\n```"
             }
           ]
         }
