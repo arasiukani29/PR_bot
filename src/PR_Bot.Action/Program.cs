@@ -86,6 +86,21 @@ try
     Console.WriteLine("\n[2/3] Running analyzers...");
     var reviewResult = await reviewEngine.RunAsync(context);
 
+    // If any analyzer failed (e.g. AI model unavailable or quota exceeded), abort and fail the job
+    var internalErrors = reviewResult.Comments.Where(c => c.FilePath == "Analyzer Internal").ToList();
+    if (internalErrors.Count > 0)
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.Error.WriteLine("\n❌ AI Review failed because model was unavailable or quota was exceeded:");
+        foreach (var err in internalErrors)
+        {
+            Console.Error.WriteLine($"  - {err.Body}");
+        }
+        Console.Error.WriteLine("Aborting job without posting false approval.");
+        Console.ResetColor();
+        return 1;
+    }
+
     // 6. Post review back to GitHub
     Console.WriteLine("\n[3/3] Posting review to GitHub pull request...");
     await gitHubService.PostReviewAsync(context, reviewResult);

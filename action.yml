@@ -18,7 +18,7 @@ inputs:
   gemini-model:
     description: 'Gemini model to use.'
     required: false
-    default: 'gemini-3.6-flash'
+    default: 'gemini-flash-lite-latest'
   dotnet-version:
     description: '.NET SDK version to install on runner.'
     required: false

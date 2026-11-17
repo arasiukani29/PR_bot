@@ -85,61 +85,34 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
             foreach (var model in modelQueue)
             {
-                const int maxRetriesPerModel = 2;
-                for (int attempt = 1; attempt <= maxRetriesPerModel; attempt++)
+                try
                 {
-                    try
-                    {
-                        _logger.LogInformation("Attempting review with Gemini model '{Model}' (Attempt {Attempt}/{Max})...", model, attempt, maxRetriesPerModel);
+                    _logger.LogInformation("Attempting review with Gemini model '{Model}'...", model);
 
-                        jsonResponse = await _client.GenerateJsonAsync(
-                            apiKey: _options.ApiKey,
-                            model: model,
-                            systemInstruction: CodeReviewPrompt.SystemInstruction,
-                            userPrompt: userPrompt,
-                            temperature: _options.Temperature,
-                            maxOutputTokens: _options.MaxOutputTokens,
-                            cancellationToken: cancellationToken);
+                    jsonResponse = await _client.GenerateJsonAsync(
+                        apiKey: _options.ApiKey,
+                        model: model,
+                        systemInstruction: CodeReviewPrompt.SystemInstruction,
+                        userPrompt: userPrompt,
+                        temperature: _options.Temperature,
+                        maxOutputTokens: _options.MaxOutputTokens,
+                        cancellationToken: cancellationToken);
 
-                        if (!string.IsNullOrWhiteSpace(jsonResponse))
-                        {
-                            currentWorkingModel = model;
-                            _logger.LogInformation("Successfully received review from model '{Model}'.", model);
-                            break;
-                        }
-                    }
-                    catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
+                    if (!string.IsNullOrWhiteSpace(jsonResponse))
                     {
-                        if (attempt < maxRetriesPerModel)
-                        {
-                            _logger.LogWarning("Gemini model '{Model}' returned 503 (temporary high demand). Retrying in 2.5s (Attempt {Attempt})...", model, attempt);
-                            await Task.Delay(2500, cancellationToken);
-                        }
-                        else
-                        {
-                            _logger.LogWarning("Gemini model '{Model}' returned 503 after {Max} attempts. Trying next fallback model...", model, maxRetriesPerModel);
-                        }
-                    }
-                    catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
-                    {
-                        _logger.LogWarning("Gemini model '{Model}' quota exceeded (429 TooManyRequests). Trying next fallback model...", model);
-                        break;
-                    }
-                    catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
-                    {
-                        _logger.LogWarning("Gemini model '{Model}' was not found (404). Trying next fallback model...", model);
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Gemini model '{Model}' failed. Trying next fallback model...", model);
+                        currentWorkingModel = model;
+                        _logger.LogInformation("Successfully received review from model '{Model}'.", model);
                         break;
                     }
                 }
-
-                if (!string.IsNullOrWhiteSpace(jsonResponse))
+                catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests or System.Net.HttpStatusCode.NotFound)
                 {
-                    break;
+                    _logger.LogWarning("Gemini model '{Model}' returned {StatusCode}. Trying fallback model in 1.5s...", model, ex.StatusCode);
+                    await Task.Delay(1500, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Gemini model '{Model}' failed. Trying next fallback model...", model);
                 }
             }
 
@@ -156,6 +129,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             else
             {
                 _logger.LogError("Failed to get review response from any Gemini model for chunk {Index}.", i + 1);
+                throw new HttpRequestException($"All Gemini models ({string.Join(", ", modelsToTry)}) failed to complete review for chunk {i + 1}. Please verify your API key and quota.");
             }
         }
 

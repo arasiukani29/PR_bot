@@ -56,7 +56,7 @@ public sealed class ReviewEngine : IReviewEngine
                     FilePath = "Analyzer Internal",
                     Line = 0,
                     Body = $"⚠️ Analyzer `{analyzer.Name}` failed to complete: {ex.Message}",
-                    Severity = AnalyzerSeverity.Warning,
+                    Severity = AnalyzerSeverity.Error,
                     AnalyzerName = analyzer.Name
                 });
             }
