@@ -69,8 +69,8 @@ public sealed class GeminiApiClient
         if (!response.IsSuccessStatusCode)
         {
             var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-            _logger.LogError("Gemini API call failed with status {StatusCode}: {Error}", response.StatusCode, errorBody);
-            throw new HttpRequestException($"Gemini API error ({response.StatusCode}): {errorBody}");
+            _logger.LogError("Gemini API call ({Model}) failed with status {StatusCode}: {Error}", model, response.StatusCode, errorBody);
+            throw new HttpRequestException($"Gemini API error ({response.StatusCode}) for model '{model}': {errorBody}", null, response.StatusCode);
         }
 
         var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);

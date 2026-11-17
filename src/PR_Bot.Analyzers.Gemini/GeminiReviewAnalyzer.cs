@@ -54,43 +54,81 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             return [];
         }
 
-        _logger.LogInformation("Submitting {ChunkCount} diff chunk(s) to Gemini ({Model})...", chunks.Count, _options.Model);
+        var candidateModels = new List<string> { _options.Model };
+        if (_options.FallbackModels != null)
+        {
+            candidateModels.AddRange(_options.FallbackModels);
+        }
+        var modelsToTry = candidateModels
+            .Where(m => !string.IsNullOrWhiteSpace(m))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _logger.LogInformation(
+            "Submitting {ChunkCount} diff chunk(s) to Gemini. Primary model: {Model}, Fallbacks: [{Fallbacks}]",
+            chunks.Count, _options.Model, string.Join(", ", modelsToTry.Skip(1)));
 
         var comments = new List<ReviewComment>();
         var summaries = new List<string>();
+        string currentWorkingModel = modelsToTry[0];
 
         for (int i = 0; i < chunks.Count; i++)
         {
             var chunk = chunks[i];
             _logger.LogInformation("Analyzing chunk {Index}/{Total} ({Length} chars)...", i + 1, chunks.Count, chunk.Length);
 
-            try
+            var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, chunk);
+            string? jsonResponse = null;
+
+            var modelQueue = new List<string> { currentWorkingModel };
+            modelQueue.AddRange(modelsToTry.Where(m => !m.Equals(currentWorkingModel, StringComparison.OrdinalIgnoreCase)));
+
+            foreach (var model in modelQueue)
             {
-                var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, chunk);
-
-                var jsonResponse = await _client.GenerateJsonAsync(
-                    apiKey: _options.ApiKey,
-                    model: _options.Model,
-                    systemInstruction: CodeReviewPrompt.SystemInstruction,
-                    userPrompt: userPrompt,
-                    temperature: _options.Temperature,
-                    maxOutputTokens: _options.MaxOutputTokens,
-                    cancellationToken: cancellationToken);
-
-                if (!string.IsNullOrWhiteSpace(jsonResponse))
+                try
                 {
-                    var (parsedComments, summary) = ParseGeminiResponse(jsonResponse, context);
-                    comments.AddRange(parsedComments);
+                    _logger.LogInformation("Attempting review with Gemini model '{Model}'...", model);
 
-                    if (!string.IsNullOrWhiteSpace(summary))
+                    jsonResponse = await _client.GenerateJsonAsync(
+                        apiKey: _options.ApiKey,
+                        model: model,
+                        systemInstruction: CodeReviewPrompt.SystemInstruction,
+                        userPrompt: userPrompt,
+                        temperature: _options.Temperature,
+                        maxOutputTokens: _options.MaxOutputTokens,
+                        cancellationToken: cancellationToken);
+
+                    if (!string.IsNullOrWhiteSpace(jsonResponse))
                     {
-                        summaries.Add(summary);
+                        currentWorkingModel = model;
+                        _logger.LogInformation("Successfully received review from model '{Model}'.", model);
+                        break;
                     }
                 }
+                catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests or System.Net.HttpStatusCode.NotFound)
+                {
+                    _logger.LogWarning("Gemini model '{Model}' returned {StatusCode}. Trying fallback model in 1.5s...", model, ex.StatusCode);
+                    await Task.Delay(1500, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Gemini model '{Model}' failed. Trying next fallback model...", model);
+                }
             }
-            catch (Exception ex)
+
+            if (!string.IsNullOrWhiteSpace(jsonResponse))
             {
-                _logger.LogError(ex, "Failed to analyze diff chunk {Index} with Gemini.", i + 1);
+                var (parsedComments, summary) = ParseGeminiResponse(jsonResponse, context);
+                comments.AddRange(parsedComments);
+
+                if (!string.IsNullOrWhiteSpace(summary))
+                {
+                    summaries.Add(summary);
+                }
+            }
+            else
+            {
+                _logger.LogError("Failed to get review response from any Gemini model for chunk {Index}.", i + 1);
             }
         }
 
