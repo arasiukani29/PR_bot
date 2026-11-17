@@ -66,7 +66,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
             try
             {
-                var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, chunk, context.ExistingComments);
+                var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, chunk);
 
                 var jsonResponse = await _client.GenerateJsonAsync(
                     apiKey: _options.ApiKey,
