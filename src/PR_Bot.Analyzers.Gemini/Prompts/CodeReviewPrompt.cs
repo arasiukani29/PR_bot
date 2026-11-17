@@ -47,6 +47,7 @@ public static class CodeReviewPrompt
         RESPONSE REQUIREMENTS:
         - You MUST respond with pure, valid JSON adhering to the exact schema below.
         - Do not output any markdown text, backticks, or commentary outside of the JSON block.
+        - CRITICAL JSON ESCAPING: All newlines inside string values (such as "message" and "summary") MUST be properly escaped as \n. Never emit raw unescaped line breaks or control characters inside JSON string literals.
         - If the code is well-written and has no findings, return an empty "findings" array and a warm, positive summary approving the work.
 
         JSON SCHEMA:

@@ -305,4 +305,32 @@ public class GeminiReviewAnalyzerTests
         // Line 23 is '+int y = 20'.
         addedLines.Should().Equal(2, 3, 23);
     }
+
+    [Fact]
+    public void ParseGeminiResponse_ShouldHandleUnescapedNewlinesInCodeBlocks()
+    {
+        // Arrange: Raw JSON with unescaped 0x0A newlines inside string values (the exact error from Gemini)
+        var jsonWithRawNewlines = "{\n" +
+            "  \"summary\": \"Initial dummy auth\",\n" +
+            "  \"findings\": [\n" +
+            "    {\n" +
+            "      \"file\": \"Controllers/AuthController.cs\",\n" +
+            "      \"line\": 33,\n" +
+            "      \"priority\": \"high\",\n" +
+            "      \"message\": \"The controller returns NotFound.\n\n```csharp\nif (!result.Success)\n{\n  return Unauthorized();\n}\n```\"\n" +
+            "    }\n" +
+            "  ]\n" +
+            "}";
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(jsonWithRawNewlines);
+
+        // Assert
+        summary.Should().Be("Initial dummy auth");
+        comments.Should().ContainSingle();
+        comments[0].FilePath.Should().Be("Controllers/AuthController.cs");
+        comments[0].Line.Should().Be(33);
+        comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
+        comments[0].Body.Should().Contain("Unauthorized()");
+    }
 }

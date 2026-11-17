@@ -304,31 +304,40 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         return sb.ToString();
     }
 
+    private static readonly JsonDocumentOptions DocumentOptions = new()
+    {
+        AllowTrailingCommas = true,
+        CommentHandling = JsonCommentHandling.Skip
+    };
+
     public (List<ReviewComment> Comments, string? Summary) ParseGeminiResponse(string json, PullRequestContext? context = null)
     {
         var comments = new List<ReviewComment>();
         string? summary = null;
 
+        var cleanJson = json.Trim();
+        if (cleanJson.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
+        {
+            cleanJson = cleanJson[7..];
+        }
+        else if (cleanJson.StartsWith("```"))
+        {
+            cleanJson = cleanJson[3..];
+        }
+
+        if (cleanJson.EndsWith("```"))
+        {
+            cleanJson = cleanJson[..^3];
+        }
+
+        cleanJson = cleanJson.Trim();
+
+        // Sanitize raw unescaped newlines/control characters inside JSON strings (RFC 8259 compliance)
+        var sanitizedJson = SanitizeJson(cleanJson);
+
         try
         {
-            var cleanJson = json.Trim();
-            if (cleanJson.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
-            {
-                cleanJson = cleanJson[7..];
-            }
-            else if (cleanJson.StartsWith("```"))
-            {
-                cleanJson = cleanJson[3..];
-            }
-
-            if (cleanJson.EndsWith("```"))
-            {
-                cleanJson = cleanJson[..^3];
-            }
-
-            cleanJson = cleanJson.Trim();
-
-            using var doc = JsonDocument.Parse(cleanJson);
+            using var doc = JsonDocument.Parse(sanitizedJson, DocumentOptions);
             var root = doc.RootElement;
 
             if (root.TryGetProperty("summary", out var summaryProp) && summaryProp.ValueKind == JsonValueKind.String)
@@ -393,10 +402,150 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to parse JSON response from Gemini: {RawJson}", json);
+            _logger.LogWarning(ex, "Standard JsonDocument.Parse failed on sanitized JSON. Attempting fallback regex parser...");
+            return FallbackRegexParse(sanitizedJson, context);
         }
 
         return (comments, summary);
+    }
+
+    /// <summary>
+    /// Fallback parser using regular expressions to extract findings and summary when JsonDocument fails on malformed JSON.
+    /// </summary>
+    private (List<ReviewComment> Comments, string? Summary) FallbackRegexParse(string json, PullRequestContext? context)
+    {
+        var comments = new List<ReviewComment>();
+        string? summary = null;
+
+        var summaryMatch = Regex.Match(json, @"""summary""\s*:\s*""(?<s>(?:\\.|[^""\\])*)""", RegexOptions.Singleline);
+        if (summaryMatch.Success)
+        {
+            summary = Regex.Unescape(summaryMatch.Groups["s"].Value);
+        }
+
+        // Match individual finding objects in the findings array
+        var findingRegex = new Regex(
+            @"\{\s*""file""\s*:\s*""(?<file>[^""]+)""\s*,\s*""line""\s*:\s*(?<line>\d+)\s*,\s*""(?:priority|severity)""\s*:\s*""(?<priority>[^""]+)""\s*,\s*""message""\s*:\s*""(?<message>(?:\\.|[^""\\])*)""\s*\}",
+            RegexOptions.Singleline);
+
+        var matches = findingRegex.Matches(json);
+        foreach (Match match in matches)
+        {
+            var file = match.Groups["file"].Value;
+            var line = int.Parse(match.Groups["line"].Value);
+            var priorityStr = match.Groups["priority"].Value;
+            var message = Regex.Unescape(match.Groups["message"].Value);
+
+            var severity = (priorityStr.ToLowerInvariant()) switch
+            {
+                "high" or "error" or "critical" => AnalyzerSeverity.Error,
+                "low" or "info" => AnalyzerSeverity.Info,
+                _ => AnalyzerSeverity.Warning
+            };
+
+            var priorityBadge = severity switch
+            {
+                AnalyzerSeverity.Error => "🔴 **[HIGH PRIORITY]**",
+                AnalyzerSeverity.Warning => "🟡 **[MEDIUM PRIORITY]**",
+                _ => "🟢 **[LOW PRIORITY]**"
+            };
+
+            string resolvedFile = file;
+            int? diffPosition = null;
+            if (context != null)
+            {
+                var matchingFile = context.ChangedFiles.FirstOrDefault(f =>
+                    f.FileName.Equals(file, StringComparison.OrdinalIgnoreCase) ||
+                    f.FileName.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith("/" + f.FileName, StringComparison.OrdinalIgnoreCase));
+
+                if (matchingFile != null)
+                {
+                    resolvedFile = matchingFile.FileName;
+                    diffPosition = FindDiffPosition(matchingFile.Patch, line);
+                }
+            }
+
+            comments.Add(new ReviewComment
+            {
+                FilePath = resolvedFile,
+                Line = line,
+                DiffPosition = diffPosition,
+                Body = $"🤖 **Gemini AI Review** {priorityBadge}\n\n{message}",
+                Severity = severity,
+                AnalyzerName = Name
+            });
+        }
+
+        return (comments, summary);
+    }
+
+    /// <summary>
+    /// Sanitizes raw JSON from LLM responses by escaping raw unescaped control characters (such as 0x0A / \n)
+    /// inside JSON string literals that violate RFC 8259.
+    /// </summary>
+    public static string SanitizeJson(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return json;
+
+        var sb = new StringBuilder(json.Length + 128);
+        bool inString = false;
+        bool isEscaped = false;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+
+            if (inString)
+            {
+                if (c == '\\')
+                {
+                    isEscaped = !isEscaped;
+                    sb.Append(c);
+                }
+                else if (c == '"' && !isEscaped)
+                {
+                    inString = false;
+                    sb.Append(c);
+                }
+                else
+                {
+                    if (c == '\n')
+                    {
+                        sb.Append("\\n");
+                    }
+                    else if (c == '\r')
+                    {
+                        sb.Append("\\r");
+                    }
+                    else if (c == '\t')
+                    {
+                        sb.Append("\\t");
+                    }
+                    else if (c < 0x20)
+                    {
+                        sb.Append($"\\u{(int)c:x4}");
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                    }
+
+                    isEscaped = false;
+                }
+            }
+            else
+            {
+                if (c == '"')
+                {
+                    inString = true;
+                    isEscaped = false;
+                }
+                sb.Append(c);
+            }
+        }
+
+        return sb.ToString();
     }
 
     public static int? FindDiffPosition(string? patch, int targetLine)
