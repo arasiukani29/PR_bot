@@ -78,8 +78,8 @@ public sealed class GitHubService : IGitHubService
     {
         var summaryMarkdown = BuildReviewMarkdown(context, result);
 
-        // 1. Post Inline Comments on PR Files Tab (via PullRequestReviewCreate)
-        await PostInlineReviewAsync(context, result, summaryMarkdown, cancellationToken);
+        // 1. Post Inline Comments on PR Files Tab (without duplicating summary body)
+        await PostInlineReviewAsync(context, result, cancellationToken);
 
         // 2. Post / Update the Single Summary Comment on PR Discussion Tab
         await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
@@ -88,7 +88,6 @@ public sealed class GitHubService : IGitHubService
     private async Task PostInlineReviewAsync(
         PullRequestContext context,
         ReviewResult result,
-        string summaryMarkdown,
         CancellationToken cancellationToken)
     {
         // Fetch existing review comments on the PR to prevent duplicate comments across commits
@@ -129,6 +128,12 @@ public sealed class GitHubService : IGitHubService
             }
         }
 
+        if (inlineComments.Count == 0)
+        {
+            _logger.LogInformation("No new inline comments to submit for PR #{PrNumber}.", context.PullRequestNumber);
+            return;
+        }
+
         _logger.LogInformation(
             "Submitting review to PR #{PrNumber} with {Count} new inline comment(s)...",
             context.PullRequestNumber, inlineComments.Count);
@@ -139,8 +144,8 @@ public sealed class GitHubService : IGitHubService
             {
                 CommitId = context.HeadSha,
                 Event = PullRequestReviewEvent.Comment,
-                Body = summaryMarkdown,
-                Comments = inlineComments.Count > 0 ? inlineComments : null
+                Body = null, // Set to null so GitHub doesn't post a duplicate summary review comment
+                Comments = inlineComments
             };
 
             await _client.PullRequest.Review.Create(
@@ -149,11 +154,11 @@ public sealed class GitHubService : IGitHubService
                 context.PullRequestNumber,
                 review);
 
-            _logger.LogInformation("Successfully submitted PR review.");
+            _logger.LogInformation("Successfully submitted PR review with inline comments.");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to submit review batch. Falling back to summary comment.");
+            _logger.LogWarning(ex, "Failed to submit review batch. Inline comments could not be posted.");
         }
     }
 
