@@ -13,15 +13,16 @@ public sealed class GeminiOptions
     public string? ApiKey { get; set; }
 
     /// <summary>
-    /// Primary model name to use (default: gemini-3.8-flash).
+    /// Primary model name to use (default: gemini-3.6-flash).
     /// </summary>
-    public string Model { get; set; } = "gemini-3.8-flash";
+    public string Model { get; set; } = "gemini-3.6-flash";
 
     /// <summary>
     /// Fallback free-tier models to try if the primary model returns 503 Service Unavailable, 429, or 404.
     /// </summary>
     public string[] FallbackModels { get; set; } =
     [
+        "gemini-3.6-flash",
         "gemini-3.8-flash",
         "gemini-3.5-flash",
         "gemini-3.5-flash-lite"
