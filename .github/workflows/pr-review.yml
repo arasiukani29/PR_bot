@@ -24,5 +24,4 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
-          gemini-model: 'gemini-flash-lite-latest'
           fail-on-errors: 'false'

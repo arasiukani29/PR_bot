@@ -13,9 +13,15 @@ public sealed class GeminiOptions
     public string? ApiKey { get; set; }
 
     /// <summary>
-    /// Primary model name to use (default: gemini-flash-lite-latest).
+    /// The single source of truth default model name.
+    /// Changing this value updates the default model everywhere across the bot.
     /// </summary>
-    public string Model { get; set; } = "gemini-flash-lite-latest";
+    public const string DefaultModel = "gemini-flash-lite-latest";
+
+    /// <summary>
+    /// Primary model name to use.
+    /// </summary>
+    public string Model { get; set; } = DefaultModel;
 
     /// <summary>
     /// Fallback free-tier models to try if the primary model returns 503 Service Unavailable, 429, or 404.

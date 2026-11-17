@@ -1,5 +1,7 @@
 namespace PR_Bot.Action;
 
+using PR_Bot.Analyzers.Gemini;
+
 /// <summary>
 /// Reads and validates inputs provided by GitHub Actions environment variables.
 /// </summary>
@@ -46,7 +48,8 @@ public sealed class ActionInputs
         HeadSha = Environment.GetEnvironmentVariable("PR_HEAD_SHA") ?? "HEAD";
 
         GeminiApiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
-        GeminiModel = Environment.GetEnvironmentVariable("GEMINI_MODEL") ?? "gemini-flash-lite-latest";
+        var envModel = Environment.GetEnvironmentVariable("GEMINI_MODEL");
+        GeminiModel = !string.IsNullOrWhiteSpace(envModel) ? envModel : GeminiOptions.DefaultModel;
 
         var failOnErrStr = Environment.GetEnvironmentVariable("FAIL_ON_ERRORS") ?? "false";
         FailOnErrors = bool.TryParse(failOnErrStr, out var fail) && fail;
