@@ -51,4 +51,4 @@ runs:
         GEMINI_MODEL: ${{ inputs.gemini-model }}
         FAIL_ON_ERRORS: ${{ inputs.fail-on-errors }}
       run: |
-        dotnet run --project "${{ github.action_path }}/src/PR_Bot.Action/PR_Bot.Action.csproj"
+        dotnet run --configuration Release --project "${{ github.action_path }}/src/PR_Bot.Action/PR_Bot.Action.csproj"

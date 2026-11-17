@@ -26,7 +26,7 @@ public sealed class ReviewEngine : IReviewEngine
     {
         var sortedAnalyzers = _analyzers.OrderBy(a => a.Order).ToList();
         var allComments = new List<ReviewComment>();
-        string? aiSummary = null;
+        var summaryParts = new List<string>();
 
         _logger.LogInformation(
             "Starting review for PR #{PrNumber} with {Count} analyzers registered.",
@@ -41,9 +41,10 @@ public sealed class ReviewEngine : IReviewEngine
                 var comments = await analyzer.AnalyzeAsync(context, cancellationToken);
                 allComments.AddRange(comments);
 
+                // Accumulate summaries from every analyzer so none are silently discarded
                 if (!string.IsNullOrWhiteSpace(analyzer.Summary))
                 {
-                    aiSummary = analyzer.Summary;
+                    summaryParts.Add(analyzer.Summary);
                 }
 
                 _logger.LogInformation("Analyzer [{Name}] finished with {Count} finding(s).", analyzer.Name, comments.Count);
@@ -65,7 +66,7 @@ public sealed class ReviewEngine : IReviewEngine
         return new ReviewResult
         {
             Comments = allComments,
-            SummaryMarkdown = aiSummary
+            SummaryMarkdown = summaryParts.Count > 0 ? string.Join("\n\n---\n\n", summaryParts) : null
         };
     }
 }

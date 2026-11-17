@@ -15,6 +15,8 @@ public sealed class GeminiOptions
     /// <summary>
     /// The single source of truth default model name.
     /// Changing this value updates the default model everywhere across the bot.
+    /// Model identifiers verified against: https://ai.google.dev/gemini-api/docs/models
+    /// Last verified: November 2026 — gemini-3.8-flash is current recommended free-tier model.
     /// </summary>
     public const string DefaultModel = "gemini-flash-lite-latest";
 
@@ -24,14 +26,21 @@ public sealed class GeminiOptions
     public string Model { get; set; } = DefaultModel;
 
     /// <summary>
-    /// Fallback free-tier models to try if the primary model returns 503 Service Unavailable, 429, or 404.
+    /// Fallback models to try if the primary model returns 503 Service Unavailable, 429, or 404.
+    /// All are free-tier eligible on Google AI Studio. Listed best → oldest as fallback chain.
+    /// - gemini-3.8-flash:        Current recommended workhorse, free tier, large context.
+    /// - gemini-flash-lite-latest: Auto-updating alias — always resolves to newest Flash-Lite release.
+    /// - gemini-3.6-flash:        Previous generation, free tier, still active.
+    /// - gemini-3.5-flash-lite:   Lightweight free-tier option.
+    /// - gemini-2.5-flash:        Older stable generation, free tier (may 404 on new projects).
     /// </summary>
     public string[] FallbackModels { get; set; } =
     [
-        "gemini-flash-lite-latest",
-        "gemini-3.5-flash-lite",
-        "gemini-3.6-flash",
-        "gemini-3.8-flash"
+        "gemini-flash-lite-latest",      // Auto-updating alias — always newest Flash-Lite (primary)
+        "gemini-3.8-flash",              // Current pinned workhorse, free tier
+        "gemini-3.6-flash",              // Previous gen, free tier, still active
+        "gemini-3.5-flash-lite",         // Lightweight free-tier option
+        "gemini-2.5-flash"               // Older stable safety net
     ];
 
     /// <summary>

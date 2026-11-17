@@ -105,6 +105,11 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         break;
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    // Propagate cancellation immediately — do not fall through to the next model.
+                    throw;
+                }
                 catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests or System.Net.HttpStatusCode.NotFound)
                 {
                     _logger.LogWarning("Gemini model '{Model}' returned {StatusCode}. Trying fallback model in 1.5s...", model, ex.StatusCode);
@@ -236,6 +241,9 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         _ => "🟢 **[LOW PRIORITY]**"
                     };
 
+                    // Resolve the reported file path against the actual changed files in the PR.
+                    // Use a separate variable so the parsed value is never silently mutated.
+                    string resolvedFile = file;
                     int? diffPosition = null;
                     if (context != null)
                     {
@@ -246,14 +254,14 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
                         if (matchingFile != null)
                         {
-                            file = matchingFile.FileName;
+                            resolvedFile = matchingFile.FileName;
                             diffPosition = FindDiffPosition(matchingFile.Patch, line);
                         }
                     }
 
                     comments.Add(new ReviewComment
                     {
-                        FilePath = file,
+                        FilePath = resolvedFile,
                         Line = line,
                         DiffPosition = diffPosition,
                         Body = $"🤖 **Gemini AI Review** {priorityBadge}\n\n{message}",
