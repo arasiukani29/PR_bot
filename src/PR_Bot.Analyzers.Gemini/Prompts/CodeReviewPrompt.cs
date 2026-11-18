@@ -55,7 +55,7 @@ public static class CodeReviewPrompt
 
         11. STRICT LINE PRECISION (NEVER TARGET BRACES OR BLANK LINES):
            - Every finding's "line" number MUST point to the EXACT line of meaningful code containing the defect.
-           - NEVER report line numbers containing only opening or closing braces ({ or }), blank lines, or closing parentheses.
+           - NEVER report line numbers containing only opening or closing braces (open or close braces), blank lines, or closing parentheses.
            - If a bug is inside a method (e.g. an invalid if-statement, logic bug, or bad return value), target that exact statement line (e.g. the line with 'if' or 'return'), NOT the method's opening or closing brace.
            - If an issue is about method parameters, annotations, or missing method-level validations, target the method declaration line (e.g. 'public async Task<IActionResult> ...'), NEVER the opening '{'.
 
