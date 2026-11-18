@@ -380,6 +380,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                     // Resolve the reported file path against the actual changed files in the PR.
                     // Use a separate variable so the parsed value is never silently mutated.
                     string resolvedFile = file;
+                    int resolvedLine = line;
                     int? diffPosition = null;
                     if (context != null)
                     {
@@ -391,10 +392,11 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         if (matchingFile != null)
                         {
                             resolvedFile = matchingFile.FileName;
-                            diffPosition = FindDiffPosition(matchingFile.Patch, line);
+                            resolvedLine = AdjustMeaningfulLine(matchingFile, line);
+                            diffPosition = FindDiffPosition(matchingFile.Patch, resolvedLine);
                             if (!diffPosition.HasValue)
                             {
-                                diffPosition = FindClosestDiffPosition(matchingFile.Patch, line);
+                                diffPosition = FindClosestDiffPosition(matchingFile.Patch, resolvedLine);
                             }
                         }
                     }
@@ -402,7 +404,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                     comments.Add(new ReviewComment
                     {
                         FilePath = resolvedFile,
-                        Line = line,
+                        Line = resolvedLine,
                         DiffPosition = diffPosition,
                         Body = $"🤖 **Gemini AI Review** {priorityBadge}\n\n{message}",
                         Severity = severity,
@@ -462,6 +464,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             };
 
             string resolvedFile = file;
+            int resolvedLine = line;
             int? diffPosition = null;
             if (context != null)
             {
@@ -473,10 +476,11 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 if (matchingFile != null)
                 {
                     resolvedFile = matchingFile.FileName;
-                    diffPosition = FindDiffPosition(matchingFile.Patch, line);
+                    resolvedLine = AdjustMeaningfulLine(matchingFile, line);
+                    diffPosition = FindDiffPosition(matchingFile.Patch, resolvedLine);
                     if (!diffPosition.HasValue)
                     {
-                        diffPosition = FindClosestDiffPosition(matchingFile.Patch, line);
+                        diffPosition = FindClosestDiffPosition(matchingFile.Patch, resolvedLine);
                     }
                 }
             }
@@ -484,7 +488,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             comments.Add(new ReviewComment
             {
                 FilePath = resolvedFile,
-                Line = line,
+                Line = resolvedLine,
                 DiffPosition = diffPosition,
                 Body = $"🤖 **Gemini AI Review** {priorityBadge}\n\n{message}",
                 Severity = severity,
@@ -667,5 +671,92 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         }
 
         return closestDiffPos;
+    }
+
+    /// <summary>
+    /// Checks if targetLine points to a meaningless line (such as a solitary opening or closing brace '{' or '}',
+    /// or empty whitespace). If so, scans upward to find the closest meaningful code statement (e.g. method signature,
+    /// statement, condition) so the GitHub inline review comment displays the actual code in context.
+    /// </summary>
+    public static int AdjustMeaningfulLine(PullRequestFileChange? file, int targetLine)
+    {
+        if (file == null || targetLine <= 0) return targetLine;
+
+        // Attempt 1: Check in FullContent if available
+        if (!string.IsNullOrWhiteSpace(file.FullContent))
+        {
+            var lines = file.FullContent.Split('\n');
+            if (targetLine <= lines.Length)
+            {
+                var targetText = lines[targetLine - 1].Trim();
+                if (IsMeaninglessBraceOrEmpty(targetText))
+                {
+                    // Scan upward to find the nearest meaningful line
+                    for (int i = targetLine - 1; i >= 1; i--)
+                    {
+                        var candidate = lines[i - 1].Trim();
+                        if (!IsMeaninglessBraceOrEmpty(candidate))
+                        {
+                            return i;
+                        }
+                    }
+                }
+            }
+            return targetLine;
+        }
+
+        // Attempt 2: If only Patch is available, scan patch lines
+        if (!string.IsNullOrWhiteSpace(file.Patch))
+        {
+            var patchLines = file.Patch.Split('\n');
+            int currentLine = 0;
+            bool foundFirstHunk = false;
+            var lineMap = new Dictionary<int, string>();
+
+            foreach (var rawLine in patchLines)
+            {
+                var line = rawLine.TrimEnd('\r');
+                var match = HunkRegex.Match(line);
+                if (match.Success)
+                {
+                    foundFirstHunk = true;
+                    currentLine = int.Parse(match.Groups[1].Value);
+                    continue;
+                }
+
+                if (!foundFirstHunk) continue;
+
+                if (line.StartsWith('+') && !line.StartsWith("+++"))
+                {
+                    lineMap[currentLine] = line[1..].Trim();
+                    currentLine++;
+                }
+                else if (line.StartsWith(' '))
+                {
+                    lineMap[currentLine] = line[1..].Trim();
+                    currentLine++;
+                }
+            }
+
+            if (lineMap.TryGetValue(targetLine, out var text) && IsMeaninglessBraceOrEmpty(text))
+            {
+                // Scan upward for previous meaningful line in map
+                for (int candidate = targetLine - 1; candidate >= 1; candidate--)
+                {
+                    if (lineMap.TryGetValue(candidate, out var prevText) && !IsMeaninglessBraceOrEmpty(prevText))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
+
+        return targetLine;
+    }
+
+    public static bool IsMeaninglessBraceOrEmpty(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return true;
+        return text is "{" or "}" or "};" or "});" or "()" or ") {" or "){";
     }
 }

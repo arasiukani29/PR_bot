@@ -505,4 +505,144 @@ public class GeminiReviewAnalyzerTests
         userMsg.Should().Contain("ZERO-WITHHOLDING RULE");
         userMsg.Should().Contain("5 review pillars");
     }
+
+    [Fact]
+    public void CodeReviewPrompt_ShouldContainAntiPingPongAndUniversalPriorityRules()
+    {
+        var instruction = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.SystemInstruction;
+
+        // Anti-speculation and anti-bikeshedding rules
+        instruction.Should().Contain("NO SPECULATIVE \"WHAT-IF\" CRITIQUES");
+        instruction.Should().Contain("NO BIKESHEDDING OR CONTRADICTORY PING-PONGING");
+        instruction.Should().Contain("THE \"PROVE THE BUG\" TEST");
+
+        // Priority and new code rules
+        instruction.Should().Contain("high\" (Critical Bug / Security Blocker)");
+        instruction.Should().Contain("medium\" (Direct Logic Flaws in Changed Code — NO DEMANDING NEW CODE)");
+        instruction.Should().Contain("low\" (Optional Suggestions & Ideas for New Code)");
+
+        // UserMessage instructions
+        var userMsg = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.BuildUserMessage("Title", "author", "diff");
+        userMsg.Should().Contain("STRICT PRIORITY HIERARCHY");
+        userMsg.Should().Contain("NO SPECULATION OR BIKESHEDDING");
+    }
+
+    [Fact]
+    public void AdjustMeaningfulLine_ShouldSnapToPreviousCodeStatement_WhenLineIsClosingBrace()
+    {
+        // Arrange: Line 59 is a closing brace '}', line 58 is a return statement
+        var code = """
+        namespace Services;
+        public class AuthService
+        {
+            public bool SecureStringEquals(string a, string b)
+            {
+                if (a.Length != b.Length) return false;
+                return a == b;
+            }
+        }
+        """;
+        var lines = code.Split('\n');
+        // Let's create a file change with 59 lines where line 59 is '}' and line 58 is code
+        var fullContent = string.Join("\n", Enumerable.Range(1, 57).Select(i => $"// Line {i}"))
+                          + "\n    return CryptographicOperations.FixedTimeEquals(aBytes, bBytes);"
+                          + "\n}";
+
+        var file = new PullRequestFileChange
+        {
+            FileName = "Services/AuthService.cs",
+            Status = "modified",
+            Additions = 2,
+            Deletions = 0,
+            Changes = 2,
+            FullContent = fullContent
+        };
+
+        // Act (target line is 59, which is '}')
+        var adjusted = GeminiReviewAnalyzer.AdjustMeaningfulLine(file, targetLine: 59);
+
+        // Assert: Should snap upward to line 58
+        adjusted.Should().Be(58);
+    }
+
+    [Fact]
+    public void AdjustMeaningfulLine_ShouldSnapToMethodSignature_WhenLineIsOpeningBrace()
+    {
+        // Arrange: Line 19 is method signature, line 20 is '{'
+        var fullContent = string.Join("\n", Enumerable.Range(1, 18).Select(i => $"// Line {i}"))
+                          + "\npublic async Task<IActionResult> Login([FromBody] LoginRequestDto request)"
+                          + "\n{"
+                          + "\n    return Ok();"
+                          + "\n}";
+
+        var file = new PullRequestFileChange
+        {
+            FileName = "Controllers/AuthController.cs",
+            Status = "modified",
+            Additions = 4,
+            Deletions = 0,
+            Changes = 4,
+            FullContent = fullContent
+        };
+
+        // Act (target line is 20, which is '{')
+        var adjusted = GeminiReviewAnalyzer.AdjustMeaningfulLine(file, targetLine: 20);
+
+        // Assert: Should snap upward to line 19
+        adjusted.Should().Be(19);
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_WithContext_ShouldAdjustBraceLinesToMeaningfulCode()
+    {
+        // Arrange
+        var fullContent = "line 1\npublic void Method()\n{\n    DoSomething();\n}";
+        var patch = "@@ -1,5 +1,5 @@\n line 1\n public void Method()\n {\n+    DoSomething();\n }";
+
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 1,
+            Title = "Test",
+            Author = "author",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "TestService.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 0,
+                    Changes = 1,
+                    Patch = patch,
+                    FullContent = fullContent
+                }
+            ]
+        };
+
+        var json = """
+        {
+          "findings": [
+            {
+              "file": "TestService.cs",
+              "line": 5,
+              "priority": "high",
+              "message": "Defect at closing brace."
+            }
+          ],
+          "summary": "Review summary"
+        }
+        """;
+
+        // Act
+        var (comments, _) = _analyzer.ParseGeminiResponse(json, context);
+
+        // Assert: Line 5 is '}', should snap to line 4 ('DoSomething();')
+        comments.Should().ContainSingle();
+        comments[0].Line.Should().Be(4);
+    }
 }
