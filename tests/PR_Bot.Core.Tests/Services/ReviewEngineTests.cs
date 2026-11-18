@@ -109,4 +109,104 @@ public class ReviewEngineTests
         result.HealthGrade.Should().Be(expectedGrade);
         result.HealthProgressBar.Should().Contain($"{expectedScore}%");
     }
+
+    [Fact]
+    public void BuildReviewMarkdown_WithCriticalIssues_RendersCautionAlertAndDashboard()
+    {
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 42,
+            Title = "feat: add auth",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature/auth",
+            HeadSha = "abc",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "src/AuthService.cs",
+                    Status = "modified",
+                    Additions = 20,
+                    Deletions = 5,
+                    Changes = 25
+                }
+            ]
+        };
+
+        var result = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment
+                {
+                    FilePath = "src/AuthService.cs",
+                    Line = 15,
+                    Title = "SQL Injection in Login",
+                    Category = "Security",
+                    WhyItMatters = "Exposes database to arbitrary queries",
+                    Body = "Vulnerable query concatenation",
+                    Severity = AnalyzerSeverity.Critical,
+                    AnalyzerName = "GeminiAI"
+                }
+            ],
+            SummaryMarkdown = "Executive summary of changes."
+        };
+
+        var markdown = GitHubService.BuildReviewMarkdown(context, result);
+
+        // Assertions for UI elements
+        markdown.Should().Contain(GitHubService.BotCommentMarker);
+        markdown.Should().Contain("## 🤖 Universal PR Review Bot — Review Dashboard");
+        markdown.Should().Contain("> [!CAUTION]");
+        markdown.Should().Contain("### 🚨 VERDICT: CHANGES REQUIRED");
+        markdown.Should().Contain("### 🩺 Code Quality & Health Scorecard");
+        markdown.Should().Contain("### 📁 Audited Files Matrix");
+        markdown.Should().Contain("`src/AuthService.cs`");
+        markdown.Should().Contain("`+20 / -5`");
+        markdown.Should().Contain("1 Critical");
+        markdown.Should().Contain("### 🧠 AI Executive Summary (Google Gemini)");
+        markdown.Should().Contain("Executive summary of changes.");
+        markdown.Should().Contain("<details open>");
+        markdown.Should().Contain("### 💡 Developer Next Steps");
+    }
+
+    [Fact]
+    public void BuildReviewMarkdown_WithCleanPR_RendersTipAlertAndPassedGate()
+    {
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 10,
+            Title = "feat: clean code",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature/clean",
+            HeadSha = "abc",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "src/Helper.cs",
+                    Status = "added",
+                    Additions = 10,
+                    Deletions = 0,
+                    Changes = 10
+                }
+            ]
+        };
+
+        var result = new ReviewResult { Comments = [] };
+
+        var markdown = GitHubService.BuildReviewMarkdown(context, result);
+
+        markdown.Should().Contain("> [!TIP]");
+        markdown.Should().Contain("### ✨ VERDICT: READY TO MERGE — PERFECT SCORE (100/100)");
+        markdown.Should().Contain("PASSED ✅");
+        markdown.Should().Contain("Clean (0 issues)");
+        markdown.Should().Contain("✨ **No code quality, reliability, or security issues detected");
+    }
 }

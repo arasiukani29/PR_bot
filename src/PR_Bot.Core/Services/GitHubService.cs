@@ -273,53 +273,119 @@ public sealed class GitHubService : IGitHubService
         var highCount = result.HighCount;
         var mediumCount = result.MediumCount;
         var lowCount = result.LowCount;
+        var totalCount = criticalCount + highCount + mediumCount + lowCount;
 
         var sb = new StringBuilder();
 
-        // Hidden marker to identify bot comments and update them on re-runs
+        // 1. Hidden marker to identify bot comments for upsert
         sb.AppendLine(BotCommentMarker);
-        sb.AppendLine("## 🤖 Universal PR Review Bot Summary");
+
+        // 2. Header banner
+        sb.AppendLine("## 🤖 Universal PR Review Bot — Review Dashboard");
         sb.AppendLine();
-        sb.AppendLine($"> Reviewing PR **#{context.PullRequestNumber}**: `{context.Title}` by @{context.Author}");
+        sb.AppendLine($"> **Pull Request:** `#{context.PullRequestNumber}` — **{context.Title}**  ");
+        sb.AppendLine($"> 👤 **Author:** @{context.Author} &nbsp;•&nbsp; 🌿 **Branches:** `{context.HeadBranch}` ➔ `{context.BaseBranch}` &nbsp;•&nbsp; 📁 **Files Audited:** {context.ChangedFiles.Count}");
         sb.AppendLine();
 
-        // Code Health Score Section
-        var healthIcon = result.HealthScore switch
+        // 3. Verdict Alert Banner (GitHub Flavored Markdown native alert)
+        if (criticalCount > 0)
         {
-            >= 90 => "🟢",
-            >= 75 => "🟡",
-            >= 50 => "🟠",
-            _ => "🔴"
-        };
-
-        sb.AppendLine($"### {healthIcon} Code Health Score: **{result.HealthScore}/100** — Grade: **{result.HealthGrade}**");
-        sb.AppendLine("```text");
-        sb.AppendLine(result.HealthProgressBar);
-        sb.AppendLine("```");
-        sb.AppendLine();
-
-        // Priority Metrics Table (4 Tiers)
-        sb.AppendLine("| Status | Priority Level | Issues |");
-        sb.AppendLine("|:------:|:---------------|:------:|");
-        sb.AppendLine($"| {(criticalCount > 0 ? "🚨" : "✅")} | 🚨 **Critical** (Immediate Blocker) | **{criticalCount}** |");
-        sb.AppendLine($"| {(highCount > 0 ? "🔴" : "✅")} | 🔴 **High Priority** (Must Resolve) | **{highCount}** |");
-        sb.AppendLine($"| {(mediumCount > 0 ? "🟡" : "✅")} | 🟡 **Medium Priority** (Should Resolve) | **{mediumCount}** |");
-        sb.AppendLine($"| {(lowCount > 0 ? "🟢" : "✅")} | 🟢 **Low Priority** (Suggestions) | **{lowCount}** |");
-        sb.AppendLine();
-
-        // Gemini AI Section if available
-        if (!string.IsNullOrWhiteSpace(result.SummaryMarkdown))
+            sb.AppendLine("> [!CAUTION]");
+            sb.AppendLine($"> ### 🚨 VERDICT: CHANGES REQUIRED ({criticalCount} CRITICAL BLOCKER{(criticalCount > 1 ? "S" : "")})");
+            sb.AppendLine("> Critical security or crash hazards detected. These issues must be resolved before this pull request can be merged.");
+        }
+        else if (highCount > 0)
         {
-            sb.AppendLine("### 🧠 AI Code Review (Google Gemini)");
+            sb.AppendLine("> [!WARNING]");
+            sb.AppendLine($"> ### 🔴 VERDICT: CHANGES REQUESTED ({highCount} HIGH PRIORITY DEFECT{(highCount > 1 ? "S" : "")})");
+            sb.AppendLine("> Major functional defects or reliability hazards detected. Please resolve the flagged issues before merge.");
+        }
+        else if (mediumCount > 0)
+        {
+            sb.AppendLine("> [!IMPORTANT]");
+            sb.AppendLine($"> ### 🟡 VERDICT: REVIEW RECOMMENDED ({mediumCount} MEDIUM PRIORITY ISSUE{(mediumCount > 1 ? "S" : "")})");
+            sb.AppendLine("> No critical blockers found, but edge-case validations or logic improvements are strongly recommended.");
+        }
+        else if (lowCount > 0)
+        {
+            sb.AppendLine("> [!NOTE]");
+            sb.AppendLine($"> ### 🟢 VERDICT: APPROVED WITH MINOR SUGGESTIONS ({lowCount} SUGGESTION{(lowCount > 1 ? "S" : "")})");
+            sb.AppendLine("> The pull request is safe to merge. Minor optional suggestions are available for code hygiene and modern idioms.");
+        }
+        else
+        {
+            sb.AppendLine("> [!TIP]");
+            sb.AppendLine("> ### ✨ VERDICT: READY TO MERGE — PERFECT SCORE (100/100)");
+            sb.AppendLine("> All automated security, reliability, and code quality checks have passed with zero defects. Clean PR! 🎉");
+        }
+        sb.AppendLine();
+        sb.AppendLine("---");
+        sb.AppendLine();
+
+        // 4. Code Quality & Health Scorecard
+        sb.AppendLine("### 🩺 Code Quality & Health Scorecard");
+        sb.AppendLine();
+        sb.AppendLine("| Metric | Result / Status | Benchmark Visualizer |");
+        sb.AppendLine("| :--- | :---: | :--- |");
+        sb.AppendLine($"| **Code Health Score** | **{result.HealthScore} / 100** | `{result.HealthProgressBar}` |");
+        sb.AppendLine($"| **Quality Grade** | **Grade {result.HealthGrade}** | 🟢 **A** (90-100) &nbsp; 🟡 **B** (75-89) &nbsp; 🟠 **C** (50-74) &nbsp; 🔴 **F** (<50) |");
+        sb.AppendLine($"| **Defects Flagged** | **{totalCount} Total Issues** | 🚨 **{criticalCount}** Critical &nbsp;•&nbsp; 🔴 **{highCount}** High &nbsp;•&nbsp; 🟡 **{mediumCount}** Medium &nbsp;•&nbsp; 🟢 **{lowCount}** Low |");
+        sb.AppendLine($"| **Quality Gate** | **{(criticalCount == 0 && highCount == 0 ? "PASSED ✅" : "FAILED ❌")}** | {(criticalCount == 0 && highCount == 0 ? "Meets safety criteria for team review" : "Must resolve Critical & High issues to pass")} |");
+        sb.AppendLine();
+
+        // 5. Defect Priority Breakdown Table
+        sb.AppendLine("#### 📊 Defect Classification & Merge Gate");
+        sb.AppendLine();
+        sb.AppendLine("| Status | Severity Level | Impact & Merge Policy | Issues Found |");
+        sb.AppendLine("|:------:|:---------------|:----------------------|:------------:|");
+        sb.AppendLine($"| {(criticalCount > 0 ? "🚨" : "✅")} | 🚨 **Critical** | Exploitable vulnerability, secret leak, or crash | **{criticalCount}** |");
+        sb.AppendLine($"| {(highCount > 0 ? "🔴" : "✅")} | 🔴 **High Priority** | Major logic defect, race condition, data loss risk | **{highCount}** |");
+        sb.AppendLine($"| {(mediumCount > 0 ? "🟡" : "✅")} | 🟡 **Medium Priority** | Missing input validation, boundary condition, error handling | **{mediumCount}** |");
+        sb.AppendLine($"| {(lowCount > 0 ? "🟢" : "✅")} | 🟢 **Low Priority** | Code hygiene, modern idiom, optional suggestion | **{lowCount}** |");
+        sb.AppendLine();
+
+        // 6. Audited Files Matrix (if changed files are present)
+        if (context.ChangedFiles.Count > 0)
+        {
+            sb.AppendLine("---");
             sb.AppendLine();
-            sb.AppendLine(result.SummaryMarkdown);
+            sb.AppendLine("### 📁 Audited Files Matrix");
+            sb.AppendLine();
+            sb.AppendLine("| Status | File | Changes | Findings |");
+            sb.AppendLine("|:------:|:-----|:-------:|:---------|");
+
+            foreach (var file in context.ChangedFiles)
+            {
+                var fileFindings = result.Comments
+                    .Where(c => c.FilePath.Equals(file.FileName, StringComparison.OrdinalIgnoreCase) ||
+                                file.FileName.EndsWith("/" + c.FilePath, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                var (fileStatus, findingsSummary) = GetFileStatusAndSummary(fileFindings);
+                var changesStr = $"`+{file.Additions} / -{file.Deletions}`";
+
+                sb.AppendLine($"| {fileStatus} | `{file.FileName}` | {changesStr} | {findingsSummary} |");
+            }
             sb.AppendLine();
         }
 
-        // Findings Grouped by Priority
+        // 7. AI Executive Summary (if provided by Gemini)
+        if (!string.IsNullOrWhiteSpace(result.SummaryMarkdown))
+        {
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine("### 🧠 AI Executive Summary (Google Gemini)");
+            sb.AppendLine();
+            sb.AppendLine($"> {result.SummaryMarkdown.Replace("\n", "\n> ")}");
+            sb.AppendLine();
+        }
+
+        // 8. Detailed Findings Grouped by Priority
         if (result.Comments.Count > 0)
         {
-            sb.AppendLine("### 📋 Review Findings (Ordered by Priority)");
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine("### 📋 Detailed Findings & Action Items");
             sb.AppendLine();
 
             var priorityGroups = result.Comments
@@ -328,41 +394,86 @@ public sealed class GitHubService : IGitHubService
 
             foreach (var group in priorityGroups)
             {
-                var (title, icon) = group.Key switch
+                var (title, icon, isOpen) = group.Key switch
                 {
-                    AnalyzerSeverity.Critical => ("🚨 Critical Blockers (Immediate Security/Crash Hazards)", "🚨"),
-                    AnalyzerSeverity.Error => ("🔴 High Priority Issues (Must Resolve Before Merge)", "🔴"),
-                    AnalyzerSeverity.Warning => ("🟡 Medium Priority Issues (Recommended to Fix)", "⚠️"),
-                    _ => ("🟢 Low Priority Suggestions (Improvements)", "💡")
+                    AnalyzerSeverity.Critical => ("🚨 Critical Blockers (Immediate Security/Crash Hazards)", "🚨", true),
+                    AnalyzerSeverity.Error => ("🔴 High Priority Issues (Must Resolve Before Merge)", "🔴", true),
+                    AnalyzerSeverity.Warning => ("🟡 Medium Priority Issues (Recommended to Fix)", "⚠️", false),
+                    _ => ("🟢 Low Priority Suggestions (Improvements)", "💡", false)
                 };
 
-                sb.AppendLine($"<details open>");
-                sb.AppendLine($"<summary><b>{title} ({group.Count()})</b></summary>");
+                var openAttr = isOpen ? " open" : "";
+                sb.AppendLine($"<details{openAttr}>");
+                sb.AppendLine($"<summary><b>{title} — {group.Count()} issue{(group.Count() > 1 ? "s" : "")}</b></summary>");
                 sb.AppendLine();
 
                 foreach (var comment in group)
                 {
-                    sb.AppendLine($"#### {icon} `{comment.FilePath}` (Line {comment.Line})");
+                    var titleSnippet = !string.IsNullOrWhiteSpace(comment.Title) ? $" — {comment.Title}" : "";
+                    sb.AppendLine($"#### {icon} `{comment.FilePath}` (Line {comment.Line}){titleSnippet}");
                     sb.AppendLine();
                     sb.AppendLine(comment.Body);
                     sb.AppendLine();
+                    sb.AppendLine("---");
                 }
 
-                sb.AppendLine();
                 sb.AppendLine("</details>");
                 sb.AppendLine();
             }
         }
-
-        if (criticalCount == 0 && highCount == 0 && mediumCount == 0 && lowCount == 0)
+        else
         {
-            sb.AppendLine("✨ **No code quality or security issues detected! Clean PR.** 🎉");
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine("### 🎉 All Checks Clear");
+            sb.AppendLine();
+            sb.AppendLine("✨ **No code quality, reliability, or security issues detected in this pull request! Clean PR.** 🎉");
             sb.AppendLine();
         }
 
+        // 9. Actionable Next Steps Checklist
         sb.AppendLine("---");
-        sb.AppendLine("<sub>Reviewed automatically with [Universal PR Bot](https://github.com/marketplace). Configure rules in your repo workflow.</sub>");
+        sb.AppendLine();
+        sb.AppendLine("### 💡 Developer Next Steps");
+        sb.AppendLine();
+        if (totalCount > 0)
+        {
+            sb.AppendLine("- 🛠️ **Apply Fixes:** Open the **[Files changed]** tab above to review inline comments and apply one-click suggestions.");
+            sb.AppendLine("- 🔄 **Automatic Re-verification:** Push your fix commit to this branch — the bot will re-evaluate modified files and automatically mark resolved comments as `[Outdated]`.");
+        }
+        else
+        {
+            sb.AppendLine("- ✅ **Ready for Merge:** All automated checks passed. Proceed to human peer review and merge when ready.");
+        }
+        sb.AppendLine();
+
+        // 10. Footer
+        sb.AppendLine("---");
+        sb.AppendLine("<sub>Reviewed automatically with [Universal PR Bot](https://github.com/marketplace) • Powered by Google Gemini AI & .NET 10</sub>");
 
         return sb.ToString();
+    }
+
+    private static (string StatusIcon, string Summary) GetFileStatusAndSummary(List<ReviewComment> comments)
+    {
+        if (comments.Count == 0)
+        {
+            return ("✅", "Clean (0 issues)");
+        }
+
+        var crit = comments.Count(c => c.Severity == AnalyzerSeverity.Critical);
+        var high = comments.Count(c => c.Severity == AnalyzerSeverity.Error);
+        var med = comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
+        var low = comments.Count(c => c.Severity == AnalyzerSeverity.Info);
+
+        var statusIcon = crit > 0 ? "🚨" : high > 0 ? "🔴" : med > 0 ? "🟡" : "🟢";
+
+        var parts = new List<string>();
+        if (crit > 0) parts.Add($"{crit} Critical");
+        if (high > 0) parts.Add($"{high} High");
+        if (med > 0) parts.Add($"{med} Medium");
+        if (low > 0) parts.Add($"{low} Low");
+
+        return (statusIcon, string.Join(", ", parts));
     }
 }
