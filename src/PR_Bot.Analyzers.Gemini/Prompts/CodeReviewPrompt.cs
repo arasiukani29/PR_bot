@@ -123,7 +123,7 @@ public static class CodeReviewPrompt
             MANDATORY REVIEW INSTRUCTIONS:
             1. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance/Concurrency, Error Handling).
             2. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings, and do not stop after 4 or 5 findings. Report every defect discovered.
-            3. EXACT LINE TARGETING: Provide the file, exact line number, priority, concrete explanation of impact, and an actionable markdown code fix snippet. NEVER target braces ({ or }) or empty lines; point to the exact statement containing the defect.
+            3. EXACT LINE TARGETING: Provide the file, exact line number, priority, concrete explanation of impact, and an actionable markdown code fix snippet. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
             4. STRICT PRIORITY HIERARCHY:
                - High: Real critical bugs, crashes, and security vulnerabilities ONLY.
                - Medium: Direct logic mistakes in the changed code. DO NOT demand adding new code, extra helper classes, or architectural rewrites.
