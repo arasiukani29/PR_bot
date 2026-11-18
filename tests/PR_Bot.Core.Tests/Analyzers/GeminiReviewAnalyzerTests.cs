@@ -116,11 +116,11 @@ public class GeminiReviewAnalyzerTests
         summary.Should().Be("Review complete.");
         comments.Should().HaveCount(3);
         comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
-        comments[0].Body.Should().Contain("[HIGH PRIORITY]");
+        comments[0].Body.Should().Contain("[CRITICAL]");
         comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
-        comments[1].Body.Should().Contain("[MEDIUM PRIORITY]");
+        comments[1].Body.Should().Contain("[WARNING]");
         comments[2].Severity.Should().Be(AnalyzerSeverity.Info);
-        comments[2].Body.Should().Contain("[LOW PRIORITY]");
+        comments[2].Body.Should().Contain("[SUGGESTION]");
     }
 
     [Fact]
@@ -438,17 +438,17 @@ public class GeminiReviewAnalyzerTests
         comments[0].FilePath.Should().Be("src/Security/TokenService.cs");
         comments[0].Line.Should().Be(45);
         comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
-        comments[0].Body.Should().Contain("[HIGH PRIORITY]");
+        comments[0].Body.Should().Contain("[CRITICAL]");
 
         comments[1].FilePath.Should().Be("src/Controllers/OrdersController.cs");
         comments[1].Line.Should().Be(88);
         comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
-        comments[1].Body.Should().Contain("[MEDIUM PRIORITY]");
+        comments[1].Body.Should().Contain("[WARNING]");
 
         comments[2].FilePath.Should().Be("src/Controllers/OrdersController.cs");
         comments[2].Line.Should().Be(105);
         comments[2].Severity.Should().Be(AnalyzerSeverity.Info);
-        comments[2].Body.Should().Contain("[LOW PRIORITY]");
+        comments[2].Body.Should().Contain("[SUGGESTION]");
     }
 
     [Fact]
@@ -644,5 +644,52 @@ public class GeminiReviewAnalyzerTests
         // Assert: Line 5 is '}', should snap to line 4 ('DoSomething();')
         comments.Should().ContainSingle();
         comments[0].Line.Should().Be(4);
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_WithRichStructuredFields_ShouldBuildRichGitHubSuggestionComment()
+    {
+        // Arrange
+        var json = """
+        {
+          "findings": [
+            {
+              "file": "Controllers/AuthController.cs",
+              "line": 38,
+              "priority": "high",
+              "title": "Logging Sensitive Information (Plaintext Password PII)",
+              "category": "Security",
+              "message": "The application logs the user's plaintext password directly via structured logging (_logger.LogInformation(... request.Password)).",
+              "why_it_matters": "Logging credentials exposes sensitive secrets in log management systems, violating security compliance standards and leading to credential theft.",
+              "suggested_fix": "_logger.LogInformation(\"Processing login attempt for user '{Username}'.\", request.Username);"
+            }
+          ],
+          "summary": "Security defect detected in AuthController."
+        }
+        """;
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json);
+
+        // Assert
+        summary.Should().Be("Security defect detected in AuthController.");
+        comments.Should().ContainSingle();
+
+        var comment = comments[0];
+        comment.Title.Should().Be("Logging Sensitive Information (Plaintext Password PII)");
+        comment.Category.Should().Be("Security");
+        comment.WhyItMatters.Should().Contain("violating security compliance standards");
+        comment.SuggestedFix.Should().Be("_logger.LogInformation(\"Processing login attempt for user '{Username}'.\", request.Username);");
+
+        // Verify the rendered Body contains the exact UI elements shown in GitHub comments
+        comment.Body.Should().Contain("🚨 **[CRITICAL]** Logging Sensitive Information (Plaintext Password PII)");
+        comment.Body.Should().Contain("> Category: `Security`");
+        comment.Body.Should().Contain("**Problem:**");
+        comment.Body.Should().Contain("The application logs the user's plaintext password directly");
+        comment.Body.Should().Contain("**Why It Matters:**");
+        comment.Body.Should().Contain("violating security compliance standards");
+        comment.Body.Should().Contain("**Suggested Fix:**");
+        comment.Body.Should().Contain("```suggestion");
+        comment.Body.Should().Contain("_logger.LogInformation(\"Processing login attempt for user '{Username}'.\", request.Username);");
     }
 }

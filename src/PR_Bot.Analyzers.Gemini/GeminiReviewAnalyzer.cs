@@ -370,12 +370,15 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         _ => AnalyzerSeverity.Warning
                     };
 
-                    var priorityBadge = severity switch
+                    // Extract new structured fields from the response
+                    var title = finding.TryGetProperty("title", out var tp) ? tp.GetString() : null;
+                    var category = finding.TryGetProperty("category", out var cp) ? cp.GetString() : null;
+                    var whyItMatters = finding.TryGetProperty("why_it_matters", out var wp) ? wp.GetString() : null;
+                    string? suggestedFix = null;
+                    if (finding.TryGetProperty("suggested_fix", out var sfp) && sfp.ValueKind == JsonValueKind.String)
                     {
-                        AnalyzerSeverity.Error => "🔴 **[HIGH PRIORITY]**",
-                        AnalyzerSeverity.Warning => "🟡 **[MEDIUM PRIORITY]**",
-                        _ => "🟢 **[LOW PRIORITY]**"
-                    };
+                        suggestedFix = sfp.GetString();
+                    }
 
                     // Resolve the reported file path against the actual changed files in the PR.
                     // Use a separate variable so the parsed value is never silently mutated.
@@ -401,14 +404,21 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         }
                     }
 
+                    // Build the rich inline comment body
+                    var body = BuildRichCommentBody(severity, title, category, message, whyItMatters, suggestedFix);
+
                     comments.Add(new ReviewComment
                     {
                         FilePath = resolvedFile,
                         Line = resolvedLine,
                         DiffPosition = diffPosition,
-                        Body = $"🤖 **Gemini AI Review** {priorityBadge}\n\n{message}",
+                        Body = body,
                         Severity = severity,
-                        AnalyzerName = Name
+                        AnalyzerName = Name,
+                        Title = title,
+                        Category = category,
+                        WhyItMatters = whyItMatters,
+                        SuggestedFix = suggestedFix
                     });
                 }
             }
@@ -420,6 +430,73 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         }
 
         return (comments, summary);
+    }
+
+    /// <summary>
+    /// Builds a rich, structured GitHub-flavored markdown body for an inline review comment.
+    /// Renders with severity icon, title, category badge, problem description, impact explanation,
+    /// and a native GitHub suggestion block for one-click apply.
+    /// </summary>
+    public static string BuildRichCommentBody(
+        AnalyzerSeverity severity,
+        string? title,
+        string? category,
+        string message,
+        string? whyItMatters,
+        string? suggestedFix)
+    {
+        var sb = new StringBuilder();
+
+        // Header line: severity icon + title
+        var (severityLabel, severityIcon) = severity switch
+        {
+            AnalyzerSeverity.Error => ("CRITICAL", "🚨"),
+            AnalyzerSeverity.Warning => ("WARNING", "⚠️"),
+            _ => ("SUGGESTION", "💡")
+        };
+
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            sb.AppendLine($"{severityIcon} **[{severityLabel}]** {title}");
+        }
+        else
+        {
+            sb.AppendLine($"{severityIcon} **[{severityLabel}]** Gemini AI Review");
+        }
+
+        sb.AppendLine();
+
+        // Category badge
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            sb.AppendLine($"> Category: `{category}`");
+            sb.AppendLine();
+        }
+
+        // Problem description
+        sb.AppendLine("**Problem:**");
+        sb.AppendLine(message);
+        sb.AppendLine();
+
+        // Why It Matters
+        if (!string.IsNullOrWhiteSpace(whyItMatters))
+        {
+            sb.AppendLine("**Why It Matters:**");
+            sb.AppendLine(whyItMatters);
+            sb.AppendLine();
+        }
+
+        // GitHub suggestion block (native red/green inline diff)
+        if (!string.IsNullOrWhiteSpace(suggestedFix))
+        {
+            sb.AppendLine("**Suggested Fix:**");
+            sb.AppendLine("```suggestion");
+            sb.AppendLine(suggestedFix);
+            sb.AppendLine("```");
+            sb.AppendLine();
+        }
+
+        return sb.ToString().TrimEnd();
     }
 
     /// <summary>
@@ -456,13 +533,6 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 _ => AnalyzerSeverity.Warning
             };
 
-            var priorityBadge = severity switch
-            {
-                AnalyzerSeverity.Error => "🔴 **[HIGH PRIORITY]**",
-                AnalyzerSeverity.Warning => "🟡 **[MEDIUM PRIORITY]**",
-                _ => "🟢 **[LOW PRIORITY]**"
-            };
-
             string resolvedFile = file;
             int resolvedLine = line;
             int? diffPosition = null;
@@ -485,12 +555,15 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 }
             }
 
+            // Fallback parser doesn't have structured fields — build a simpler rich body
+            var body = BuildRichCommentBody(severity, title: null, category: null, message, whyItMatters: null, suggestedFix: null);
+
             comments.Add(new ReviewComment
             {
                 FilePath = resolvedFile,
                 Line = resolvedLine,
                 DiffPosition = diffPosition,
-                Body = $"🤖 **Gemini AI Review** {priorityBadge}\n\n{message}",
+                Body = body,
                 Severity = severity,
                 AnalyzerName = Name
             });

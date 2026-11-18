@@ -92,11 +92,22 @@ public static class CodeReviewPrompt
               "file": "path/to/file.ext",
               "line": 42,
               "priority": "high|medium|low",
-              "message": "Clear explanation of the problem, failure impact, and a concrete code fix:\n\n```language\n// Suggested fix\n```"
+              "title": "Short descriptive title of the issue (e.g., Logging Sensitive Information, Null Reference on User Input, Unbounded Query Without Pagination)",
+              "category": "One of: Security, Performance, Reliability, Input Validation, Error Handling, Concurrency, Maintainability",
+              "message": "Clear explanation of the concrete problem found in the code.",
+              "why_it_matters": "One or two sentences explaining the real-world business or system impact (e.g., credential theft, data loss, service crash, compliance violation).",
+              "suggested_fix": "The exact replacement source code line(s) that should replace the current line. ONLY the raw replacement code, no markdown fences, no explanation, no diff markers. This will be placed inside a GitHub suggestion block. If no code fix applies, set to null."
             }
           ],
           "summary": "A 2-3 sentence executive summary from the Team Lead summarizing the changes, overall quality, and readiness for merge (derived after auditing all findings above)."
         }
+
+        IMPORTANT RULES FOR suggested_fix:
+        - The "suggested_fix" value must contain ONLY the replacement source code that should replace the line(s) at the reported line number.
+        - Do NOT wrap it in markdown fences (no ```). Do NOT include diff markers (+/-). Do NOT include explanatory text.
+        - It should be a drop-in replacement for the exact line(s) reported — as if you are editing the file directly.
+        - If the fix requires removing a line entirely, set suggested_fix to "" (empty string).
+        - If no concrete single-line fix is possible (e.g., the fix requires adding a new class), set suggested_fix to null.
         """;
 
     public static string BuildUserMessage(string prTitle, string author, string diffChunk)
