@@ -842,4 +842,70 @@ public class GeminiReviewAnalyzerTests
         comments[3].Severity.Should().Be(AnalyzerSeverity.Low);
         comments[3].Body.Should().Contain("💡 **[LOW]**");
     }
+
+    [Fact]
+    public void ParseGeminiResponse_WithPerFileReviewsSchema_ShouldExtractFindingsFromAllFiles()
+    {
+        // Arrange: Approach 2 schema where findings are nested under file_reviews per file
+        var json = """
+        {
+          "file_reviews": [
+            {
+              "file": "Controllers/AuthController.cs",
+              "findings": [
+                {
+                  "line": 40,
+                  "priority": "critical",
+                  "title": "Plaintext Password Logging",
+                  "category": "Security",
+                  "message": "Logs user password."
+                },
+                {
+                  "line": 59,
+                  "priority": "critical",
+                  "title": "Remote Code Execution",
+                  "category": "Security",
+                  "message": "Command injection in diagnostics."
+                }
+              ]
+            },
+            {
+              "file": "Services/AuthService.cs",
+              "findings": [
+                {
+                  "line": 25,
+                  "priority": "critical",
+                  "title": "Hardcoded Backdoor Credentials",
+                  "category": "Security",
+                  "message": "MasterAdminSecret2026! bypasses password check."
+                },
+                {
+                  "line": 45,
+                  "priority": "high",
+                  "title": "Cryptographically Weak PRNG",
+                  "category": "Security",
+                  "message": "System.Random used for session tokens."
+                }
+              ]
+            }
+          ],
+          "summary": "Audited AuthController and AuthService. Found 4 total vulnerabilities across both files."
+        }
+        """;
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json);
+
+        // Assert: Both files MUST have their findings extracted! Total = 4
+        summary.Should().Be("Audited AuthController and AuthService. Found 4 total vulnerabilities across both files.");
+        comments.Should().HaveCount(4);
+
+        // AuthController findings
+        comments.Should().Contain(c => c.FilePath == "Controllers/AuthController.cs" && c.Line == 40 && c.Severity == AnalyzerSeverity.Critical);
+        comments.Should().Contain(c => c.FilePath == "Controllers/AuthController.cs" && c.Line == 59 && c.Severity == AnalyzerSeverity.Critical);
+
+        // AuthService findings (no longer skipped!)
+        comments.Should().Contain(c => c.FilePath == "Services/AuthService.cs" && c.Line == 25 && c.Severity == AnalyzerSeverity.Critical);
+        comments.Should().Contain(c => c.FilePath == "Services/AuthService.cs" && c.Line == 45 && c.Severity == AnalyzerSeverity.High);
+    }
 }

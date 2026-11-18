@@ -419,75 +419,31 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 summary = summaryProp.GetString();
             }
 
+            // 1. Process per-file reviews schema (Approach 2: guarantees multi-file completeness in single API call)
+            if (root.TryGetProperty("file_reviews", out var fileReviews) && fileReviews.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var fileReview in fileReviews.EnumerateArray())
+                {
+                    var file = fileReview.TryGetProperty("file", out var fp) ? fp.GetString() ?? "unknown" : "unknown";
+                    if (fileReview.TryGetProperty("findings", out var fileFindings) && fileFindings.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var finding in fileFindings.EnumerateArray())
+                        {
+                            var comment = ParseFindingElement(finding, file, context, analyzerLabel);
+                            if (comment != null) comments.Add(comment);
+                        }
+                    }
+                }
+            }
+
+            // 2. Also process root-level findings if present (flat schema backwards compatibility / fallback)
             if (root.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array)
             {
                 foreach (var finding in findings.EnumerateArray())
                 {
                     var file = finding.TryGetProperty("file", out var fp) ? fp.GetString() ?? "unknown" : "unknown";
-                    var line = finding.TryGetProperty("line", out var lp) && lp.TryGetInt32(out var l) ? l : 1;
-                    var message = finding.TryGetProperty("message", out var mp) ? mp.GetString() ?? "" : "";
-
-                    var priorityStr = finding.TryGetProperty("priority", out var pp) ? pp.GetString() :
-                                      finding.TryGetProperty("severity", out var sp) ? sp.GetString() : "medium";
-
-                    var severity = (priorityStr?.ToLowerInvariant()) switch
-                    {
-                        "critical" => AnalyzerSeverity.Critical,
-                        "high" or "error" => AnalyzerSeverity.Error,
-                        "low" or "info" => AnalyzerSeverity.Info,
-                        _ => AnalyzerSeverity.Warning
-                    };
-
-                    // Extract new structured fields from the response
-                    var title = finding.TryGetProperty("title", out var tp) ? tp.GetString() : null;
-                    var category = finding.TryGetProperty("category", out var cp) ? cp.GetString() : null;
-                    var whyItMatters = finding.TryGetProperty("why_it_matters", out var wp) ? wp.GetString() : null;
-                    string? suggestedFix = null;
-                    if (finding.TryGetProperty("suggested_fix", out var sfp) && sfp.ValueKind == JsonValueKind.String)
-                    {
-                        suggestedFix = sfp.GetString();
-                    }
-
-                    // Resolve the reported file path against the actual changed files in the PR.
-                    // Use a separate variable so the parsed value is never silently mutated.
-                    string resolvedFile = file;
-                    int resolvedLine = line;
-                    int? diffPosition = null;
-                    if (context != null)
-                    {
-                        var matchingFile = context.ChangedFiles.FirstOrDefault(f =>
-                            f.FileName.Equals(file, StringComparison.OrdinalIgnoreCase) ||
-                            f.FileName.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase) ||
-                            file.EndsWith("/" + f.FileName, StringComparison.OrdinalIgnoreCase));
-
-                        if (matchingFile != null)
-                        {
-                            resolvedFile = matchingFile.FileName;
-                            resolvedLine = AdjustMeaningfulLine(matchingFile, line);
-                            diffPosition = FindDiffPosition(matchingFile.Patch, resolvedLine);
-                            if (!diffPosition.HasValue)
-                            {
-                                diffPosition = FindClosestDiffPosition(matchingFile.Patch, resolvedLine);
-                            }
-                        }
-                    }
-
-                    // Build the rich inline comment body
-                    var body = BuildRichCommentBody(severity, title, category, message, whyItMatters, suggestedFix);
-
-                    comments.Add(new ReviewComment
-                    {
-                        FilePath = resolvedFile,
-                        Line = resolvedLine,
-                        DiffPosition = diffPosition,
-                        Body = body,
-                        Severity = severity,
-                        AnalyzerName = analyzerLabel,
-                        Title = title,
-                        Category = category,
-                        WhyItMatters = whyItMatters,
-                        SuggestedFix = suggestedFix
-                    });
+                    var comment = ParseFindingElement(finding, file, context, analyzerLabel);
+                    if (comment != null) comments.Add(comment);
                 }
             }
         }
@@ -498,6 +454,71 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         }
 
         return (comments, summary);
+    }
+
+    private static ReviewComment? ParseFindingElement(JsonElement finding, string fallbackFile, PullRequestContext? context, string analyzerLabel)
+    {
+        var file = finding.TryGetProperty("file", out var fp) ? fp.GetString() ?? fallbackFile : fallbackFile;
+        var line = finding.TryGetProperty("line", out var lp) && lp.TryGetInt32(out var l) ? l : 1;
+        var message = finding.TryGetProperty("message", out var mp) ? mp.GetString() ?? "" : "";
+
+        var priorityStr = finding.TryGetProperty("priority", out var pp) ? pp.GetString() :
+                          finding.TryGetProperty("severity", out var sp) ? sp.GetString() : "medium";
+
+        var severity = (priorityStr?.ToLowerInvariant()) switch
+        {
+            "critical" => AnalyzerSeverity.Critical,
+            "high" or "error" => AnalyzerSeverity.Error,
+            "low" or "info" => AnalyzerSeverity.Info,
+            _ => AnalyzerSeverity.Warning
+        };
+
+        var title = finding.TryGetProperty("title", out var tp) ? tp.GetString() : null;
+        var category = finding.TryGetProperty("category", out var cp) ? cp.GetString() : null;
+        var whyItMatters = finding.TryGetProperty("why_it_matters", out var wp) ? wp.GetString() : null;
+        string? suggestedFix = null;
+        if (finding.TryGetProperty("suggested_fix", out var sfp) && sfp.ValueKind == JsonValueKind.String)
+        {
+            suggestedFix = sfp.GetString();
+        }
+
+        string resolvedFile = file;
+        int resolvedLine = line;
+        int? diffPosition = null;
+        if (context != null)
+        {
+            var matchingFile = context.ChangedFiles.FirstOrDefault(f =>
+                f.FileName.Equals(file, StringComparison.OrdinalIgnoreCase) ||
+                f.FileName.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase) ||
+                file.EndsWith("/" + f.FileName, StringComparison.OrdinalIgnoreCase));
+
+            if (matchingFile != null)
+            {
+                resolvedFile = matchingFile.FileName;
+                resolvedLine = AdjustMeaningfulLine(matchingFile, line);
+                diffPosition = FindDiffPosition(matchingFile.Patch, resolvedLine);
+                if (!diffPosition.HasValue)
+                {
+                    diffPosition = FindClosestDiffPosition(matchingFile.Patch, resolvedLine);
+                }
+            }
+        }
+
+        var body = BuildRichCommentBody(severity, title, category, message, whyItMatters, suggestedFix);
+
+        return new ReviewComment
+        {
+            FilePath = resolvedFile,
+            Line = resolvedLine,
+            DiffPosition = diffPosition,
+            Body = body,
+            Severity = severity,
+            AnalyzerName = analyzerLabel,
+            Title = title,
+            Category = category,
+            WhyItMatters = whyItMatters,
+            SuggestedFix = suggestedFix
+        };
     }
 
     /// <summary>
