@@ -190,57 +190,94 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
     public static List<string> BuildDiffChunks(PullRequestContext context, int maxChunkSize, GeminiOptions? options)
     {
-        var chunks = new List<string>();
-        var currentChunk = new StringBuilder();
         var opts = options ?? new GeminiOptions();
-        int filesInChunk = 0;
+        var eligibleFiles = context.ChangedFiles
+            .Where(f => !string.IsNullOrWhiteSpace(f.Patch) && !f.Status.Equals("removed", StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
-        foreach (var file in context.ChangedFiles)
+        if (eligibleFiles.Count == 0) return [];
+
+        var chunks = new List<string>();
+        var currentBatch = new List<PullRequestFileChange>();
+        int currentChars = 0;
+
+        foreach (var file in eligibleFiles)
         {
-            if (string.IsNullOrWhiteSpace(file.Patch) || file.Status.Equals("removed", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            var filePayload = BuildFileContext(file, opts) + "\n\n";
-
-            bool exceedsChars = (currentChunk.Length + filePayload.Length > maxChunkSize && currentChunk.Length > 0);
-            bool exceedsFiles = (filesInChunk >= opts.MaxFilesPerChunk && currentChunk.Length > 0);
+            var filePayload = BuildFileContext(file, opts);
+            bool exceedsChars = (currentChars + filePayload.Length > maxChunkSize && currentBatch.Count > 0);
+            bool exceedsFiles = (currentBatch.Count >= opts.MaxFilesPerChunk && currentBatch.Count > 0);
 
             if (exceedsChars || exceedsFiles)
             {
-                chunks.Add(currentChunk.ToString());
-                currentChunk.Clear();
-                filesInChunk = 0;
+                chunks.Add(RenderBatchPayload(currentBatch, opts));
+                currentBatch.Clear();
+                currentChars = 0;
             }
 
-            if (filePayload.Length > maxChunkSize && currentChunk.Length == 0)
-            {
-                chunks.Add(filePayload);
-                continue;
-            }
-
-            currentChunk.Append(filePayload);
-            filesInChunk++;
+            currentBatch.Add(file);
+            currentChars += filePayload.Length;
         }
 
-        if (currentChunk.Length > 0)
+        if (currentBatch.Count > 0)
         {
-            chunks.Add(currentChunk.ToString());
+            chunks.Add(RenderBatchPayload(currentBatch, opts));
         }
 
         return chunks;
     }
 
-    public static string BuildFileContext(PullRequestFileChange file, GeminiOptions? options = null)
+    /// <summary>
+    /// Renders a unified chunk payload containing one or more changed files.
+    /// When multiple files are present, prepends an explicit Batch File Manifest so the LLM
+    /// is explicitly instructed on how many files exist and does not stop after the first file.
+    /// </summary>
+    public static string RenderBatchPayload(List<PullRequestFileChange> batch, GeminiOptions opts)
+    {
+        var sb = new StringBuilder();
+
+        if (batch.Count > 1)
+        {
+            sb.AppendLine("================================================================================");
+            sb.AppendLine($"FILES TO AUDIT IN THIS CHUNK (Total: {batch.Count} files):");
+            for (int i = 0; i < batch.Count; i++)
+            {
+                var f = batch[i];
+                var lines = f.GetAddedOrModifiedLines();
+                var linesStr = lines.Count > 0 ? string.Join(", ", lines) : "Non-code / metadata change";
+                sb.AppendLine($"  [{i + 1}/{batch.Count}] {f.FileName} (Changed lines: [{linesStr}])");
+            }
+            sb.AppendLine();
+            sb.AppendLine("CRITICAL MULTI-FILE INSTRUCTION:");
+            sb.AppendLine($"You MUST systematically audit ALL {batch.Count} files listed above from [1/{batch.Count}] to [{batch.Count}/{batch.Count}].");
+            sb.AppendLine("DO NOT stop after inspecting file [1]. You are required to review every file and return findings across all files.");
+            sb.AppendLine("================================================================================\n");
+        }
+
+        for (int i = 0; i < batch.Count; i++)
+        {
+            var f = batch[i];
+            sb.AppendLine(BuildFileContext(f, opts, fileIndex: i + 1, totalFilesInBatch: batch.Count));
+            sb.AppendLine();
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    public static string BuildFileContext(PullRequestFileChange file, GeminiOptions? options = null, int fileIndex = 1, int totalFilesInBatch = 1)
     {
         var opts = options ?? new GeminiOptions();
         var addedLines = file.GetAddedOrModifiedLines();
         var addedLinesStr = addedLines.Count > 0 ? string.Join(", ", addedLines) : "None (deleted or non-code change)";
 
         var sb = new StringBuilder();
-        sb.AppendLine($"--- File: {file.FileName} (Status: {file.Status}) ---");
+        var header = totalFilesInBatch > 1
+            ? $">>> [FILE {fileIndex}/{totalFilesInBatch}] {file.FileName} (Status: {file.Status})"
+            : $"--- File: {file.FileName} (Status: {file.Status}) ---";
+
+        sb.AppendLine("================================================================================");
+        sb.AppendLine(header);
         sb.AppendLine($"CHANGED / ADDED LINES TO REVIEW: [{addedLinesStr}]");
+        sb.AppendLine("================================================================================");
 
         if (string.IsNullOrWhiteSpace(file.FullContent))
         {

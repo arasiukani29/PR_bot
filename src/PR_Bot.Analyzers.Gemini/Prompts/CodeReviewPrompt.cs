@@ -17,7 +17,13 @@ public static class CodeReviewPrompt
            - Never defer, withhold, or stagger suggestions across future commits or reviews. Developers must receive every single comment in this initial review so they can fix everything at once.
            - Systematically inspect every modified function and line from top to bottom against all review pillars below.
 
-        2. 5-PILLAR SYSTEMATIC AUDIT CHECKLIST:
+        2. MANDATORY MULTI-FILE COMPLETENESS (ZERO-SKIPPING POLICY):
+           - When the review chunk contains MULTIPLE files (e.g. marked as [FILE 1/N], [FILE 2/N]):
+           - You are STRICTLY FORBIDDEN from stopping after reviewing the first file.
+           - Even if [FILE 1] has multiple Critical vulnerabilities, you MUST continue and systematically audit [FILE 2], [FILE 3], and all remaining files.
+           - Your "findings" array MUST contain findings from EVERY file that has defects. Skipping any changed file is considered an evaluation failure.
+
+        3. 5-PILLAR SYSTEMATIC AUDIT CHECKLIST:
            Examine every changed line and its surrounding context against each of these 5 engineering pillars:
            - Pillar 1 (Security & Data Protection): OWASP Top 10, SQL/command/script injection, XSS, SSRF, broken auth/authz, hardcoded secrets/API keys/tokens, plaintext passwords or sensitive PII in logs (CWE-532), insecure deserialization, unsafe regex (ReDoS).
            - Pillar 2 (Reliability & Crash Prevention): Null pointer / null reference hazards, unhandled edge cases, off-by-one errors, unhandled task/thread cancellation, blocking async calls (.Result, .Wait()), thread-pool starvation, resource leaks (unclosed streams, unreleased connections, missing Dispose).

@@ -481,11 +481,13 @@ public class GeminiReviewAnalyzerTests
         // Act (using default options where all files bundle into 1 unified call)
         var chunks = GeminiReviewAnalyzer.BuildDiffChunks(context, maxChunkSize: 500000);
 
-        // Assert: 3 files with default options should produce 1 unified chunk containing all files
+        // Assert: 3 files with default options should produce 1 unified chunk containing all files and the manifest
         chunks.Should().HaveCount(1);
-        chunks[0].Should().Contain("Component1.cs");
-        chunks[0].Should().Contain("Component2.cs");
-        chunks[0].Should().Contain("Component3.cs");
+        chunks[0].Should().Contain("FILES TO AUDIT IN THIS CHUNK (Total: 3 files)");
+        chunks[0].Should().Contain("CRITICAL MULTI-FILE INSTRUCTION");
+        chunks[0].Should().Contain("[FILE 1/3] Component1.cs");
+        chunks[0].Should().Contain("[FILE 2/3] Component2.cs");
+        chunks[0].Should().Contain("[FILE 3/3] Component3.cs");
     }
 
     [Fact]
