@@ -135,6 +135,8 @@ d:\PR_bot\
 │
 └── docs/
     ├── USAGE.md                       # Comprehensive setup and parameter guide
+    ├── TEST_CASES.md                  # Step-by-step test cases for testing the bot
+    ├── INCREMENTAL_REVIEW_APPROACH.md # Delta review & resolution lifecycle
     └── CUSTOM_ANALYZERS.md            # Guide for building custom analyzers
 ```
 

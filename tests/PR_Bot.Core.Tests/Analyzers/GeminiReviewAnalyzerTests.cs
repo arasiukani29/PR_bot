@@ -908,4 +908,113 @@ public class GeminiReviewAnalyzerTests
         comments.Should().Contain(c => c.FilePath == "Services/AuthService.cs" && c.Line == 25 && c.Severity == AnalyzerSeverity.Critical);
         comments.Should().Contain(c => c.FilePath == "Services/AuthService.cs" && c.Line == 45 && c.Severity == AnalyzerSeverity.High);
     }
+
+    [Fact]
+    public void FindDiffPosition_ShouldAccuratelyMatchGitHubPositionsWithoutHunkOffset()
+    {
+        // Patch with 3 added lines in a single hunk
+        var patch = """
+            @@ -0,0 +1,3 @@
+            +declare module "foo" {
+            +  export function Component(options: any): ClassDecorator;
+            +}
+            """;
+
+        // GitHub API: Line 1 after hunk header is position 1, line 2 is position 2, line 3 is position 3
+        var posLine1 = GeminiReviewAnalyzer.FindDiffPosition(patch, 1);
+        var posLine2 = GeminiReviewAnalyzer.FindDiffPosition(patch, 2);
+        var posLine3 = GeminiReviewAnalyzer.FindDiffPosition(patch, 3);
+
+        posLine1.Should().Be(1);
+        posLine2.Should().Be(2);
+        posLine3.Should().Be(3);
+    }
+
+    [Fact]
+    public void AdjustMeaningfulLine_ShouldScanUpwardWhenTargetingClosingBrace()
+    {
+        var file = new PullRequestFileChange
+        {
+            FileName = "src/types.d.ts",
+            Status = "added",
+            Additions = 3,
+            Deletions = 0,
+            Changes = 3,
+            FullContent = """
+                declare module "foo" {
+                  export function Component(options: any): ClassDecorator;
+                }
+                """
+        };
+
+        // When AI targets line 3 (which is solitary brace '}'), adjust upward to line 2 (the function declaration)
+        var adjusted = GeminiReviewAnalyzer.AdjustMeaningfulLine(file, 3);
+        adjusted.Should().Be(2);
+    }
+
+    [Fact]
+    public void ParseFindingElement_ShouldPreserveIndentationAndTargetCorrectLine()
+    {
+        var context = new PullRequestContext
+        {
+            Owner = "test",
+            Repo = "test",
+            PullRequestNumber = 1,
+            Title = "PR",
+            Author = "user",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "src/types.d.ts",
+                    Status = "added",
+                    Additions = 3,
+                    Deletions = 0,
+                    Changes = 3,
+                    Patch = """
+                        @@ -0,0 +1,3 @@
+                        +declare module "foo" {
+                        +  export function Component(options: any): ClassDecorator;
+                        +}
+                        """,
+                    FullContent = """
+                        declare module "foo" {
+                          export function Component(options: any): ClassDecorator;
+                        }
+                        """
+                }
+            ]
+        };
+
+        var json = """
+            {
+              "findings": [
+                {
+                  "file": "src/types.d.ts",
+                  "line": 3,
+                  "priority": "low",
+                  "title": "Avoid any typing",
+                  "message": "Use strict types",
+                  "suggested_fix": "export function Component(options: Record<string, unknown>): ClassDecorator;"
+                }
+              ]
+            }
+            """;
+
+        var (comments, _) = _analyzer.ParseGeminiResponse(json, context);
+
+        comments.Should().ContainSingle();
+        var comment = comments[0];
+
+        // Should be adjusted from brace Line 3 to declaration Line 2!
+        comment.Line.Should().Be(2);
+        comment.DiffPosition.Should().Be(2);
+
+        // Leading 2 spaces indentation from Line 2 must be preserved in suggested_fix
+        comment.Body.Should().Contain("  export function Component(options: Record<string, unknown>): ClassDecorator;");
+        comment.Body.Should().Contain("```suggestion");
+    }
 }

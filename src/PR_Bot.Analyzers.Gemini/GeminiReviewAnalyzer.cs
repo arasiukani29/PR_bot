@@ -485,6 +485,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         string resolvedFile = file;
         int resolvedLine = line;
         int? diffPosition = null;
+        bool isNativeSuggestion = true;
+
         if (context != null)
         {
             var matchingFile = context.ChangedFiles.FirstOrDefault(f =>
@@ -501,10 +503,36 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 {
                     diffPosition = FindClosestDiffPosition(matchingFile.Patch, resolvedLine);
                 }
+
+                // Check target line content to preserve indentation and guard solitary braces
+                var targetLineContent = GetLineContent(matchingFile, resolvedLine);
+                if (targetLineContent != null)
+                {
+                    var trimmed = targetLineContent.Trim();
+                    if (IsMeaninglessBraceOrEmpty(trimmed))
+                    {
+                        // Target line is a closing brace/empty. Replacing a brace with code breaks syntax in GitHub suggestions!
+                        isNativeSuggestion = false;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(suggestedFix))
+                    {
+                        // Preserve leading indentation of the line being replaced so GitHub diff aligns seamlessly
+                        int indentLen = targetLineContent.TakeWhile(char.IsWhiteSpace).Count();
+                        if (indentLen > 0)
+                        {
+                            var indent = targetLineContent[..indentLen];
+                            if (!suggestedFix.StartsWith(indent) && !suggestedFix.StartsWith(" ") && !suggestedFix.StartsWith("\t"))
+                            {
+                                var fixLines = suggestedFix.Split('\n');
+                                suggestedFix = string.Join("\n", fixLines.Select(l => string.IsNullOrWhiteSpace(l) ? l : indent + l));
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        var body = BuildRichCommentBody(severity, title, category, message, whyItMatters, suggestedFix);
+        var body = BuildRichCommentBody(severity, title, category, message, whyItMatters, suggestedFix, isNativeSuggestion);
 
         return new ReviewComment
         {
@@ -532,7 +560,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         string? category,
         string message,
         string? whyItMatters,
-        string? suggestedFix)
+        string? suggestedFix,
+        bool isNativeSuggestion = true)
     {
         var sb = new StringBuilder();
 
@@ -576,13 +605,22 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             sb.AppendLine();
         }
 
-        // GitHub suggestion block (native red/green inline diff)
+        // GitHub suggestion block (native red/green inline diff) or fallback code block
         if (!string.IsNullOrWhiteSpace(suggestedFix))
         {
             sb.AppendLine("**Suggested Fix:**");
-            sb.AppendLine("```suggestion");
-            sb.AppendLine(suggestedFix);
-            sb.AppendLine("```");
+            if (isNativeSuggestion)
+            {
+                sb.AppendLine("```suggestion");
+                sb.AppendLine(suggestedFix);
+                sb.AppendLine("```");
+            }
+            else
+            {
+                sb.AppendLine("```");
+                sb.AppendLine(suggestedFix);
+                sb.AppendLine("```");
+            }
             sb.AppendLine();
         }
 
@@ -747,9 +785,15 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             var match = HunkRegex.Match(line);
             if (match.Success)
             {
-                foundFirstHunk = true;
                 currentLine = int.Parse(match.Groups[1].Value);
-                diffPosition++;
+                if (!foundFirstHunk)
+                {
+                    foundFirstHunk = true;
+                }
+                else
+                {
+                    diffPosition++;
+                }
                 continue;
             }
 
@@ -766,7 +810,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             }
             else if (line.StartsWith('-') && !line.StartsWith("---"))
             {
-                // Deleted line in diff
+                // Deleted line in diff (counts as a position in GitHub diff, but does not advance currentLine in new file)
             }
             else if (line.StartsWith(' '))
             {
@@ -804,9 +848,15 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             var match = HunkRegex.Match(line);
             if (match.Success)
             {
-                foundFirstHunk = true;
                 currentLine = int.Parse(match.Groups[1].Value);
-                diffPosition++;
+                if (!foundFirstHunk)
+                {
+                    foundFirstHunk = true;
+                }
+                else
+                {
+                    diffPosition++;
+                }
                 continue;
             }
 
@@ -822,6 +872,10 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                     closestDiffPos = diffPosition;
                 }
                 currentLine++;
+            }
+            else if (line.StartsWith('-') && !line.StartsWith("---"))
+            {
+                // Deleted line in diff
             }
             else if (line.StartsWith(' '))
             {
@@ -919,9 +973,61 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         return targetLine;
     }
 
+    /// <summary>
+    /// Retrieves the text content of a specific 1-based line number in a changed file
+    /// (using FullContent if available, or reconstructing from the git patch hunk lines).
+    /// </summary>
+    public static string? GetLineContent(PullRequestFileChange? file, int targetLine)
+    {
+        if (file == null || targetLine <= 0) return null;
+
+        if (!string.IsNullOrWhiteSpace(file.FullContent))
+        {
+            var lines = file.FullContent.Split('\n');
+            if (targetLine <= lines.Length)
+            {
+                return lines[targetLine - 1].TrimEnd('\r');
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(file.Patch))
+        {
+            var patchLines = file.Patch.Split('\n');
+            int currentLine = 0;
+            bool foundFirstHunk = false;
+
+            foreach (var rawLine in patchLines)
+            {
+                var line = rawLine.TrimEnd('\r');
+                var match = HunkRegex.Match(line);
+                if (match.Success)
+                {
+                    foundFirstHunk = true;
+                    currentLine = int.Parse(match.Groups[1].Value);
+                    continue;
+                }
+
+                if (!foundFirstHunk) continue;
+
+                if (line.StartsWith('+') && !line.StartsWith("+++"))
+                {
+                    if (currentLine == targetLine) return line[1..];
+                    currentLine++;
+                }
+                else if (line.StartsWith(' '))
+                {
+                    if (currentLine == targetLine) return line[1..];
+                    currentLine++;
+                }
+            }
+        }
+
+        return null;
+    }
+
     public static bool IsMeaninglessBraceOrEmpty(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return true;
-        return text is "{" or "}" or "};" or "});" or "()" or ") {" or "){";
+        return text is "{" or "}" or "};" or "});" or "()" or ") {" or "){" or "];" or "]" or ");" or ")";
     }
 }
