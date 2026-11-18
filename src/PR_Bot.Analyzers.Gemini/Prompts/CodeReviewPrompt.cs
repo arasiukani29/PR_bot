@@ -19,11 +19,11 @@ public static class CodeReviewPrompt
 
         2. 5-PILLAR SYSTEMATIC AUDIT CHECKLIST:
            Examine every changed line and its surrounding context against each of these 5 engineering pillars:
-           - Pillar 1 (Security & Data Protection): OWASP Top 10, SQL/command/script injection, XSS, SSRF, broken auth/authz, hardcoded secrets/API keys/tokens, insecure deserialization, unsafe regex (ReDoS).
+           - Pillar 1 (Security & Data Protection): OWASP Top 10, SQL/command/script injection, XSS, SSRF, broken auth/authz, hardcoded secrets/API keys/tokens, plaintext passwords or sensitive PII in logs (CWE-532), insecure deserialization, unsafe regex (ReDoS).
            - Pillar 2 (Reliability & Crash Prevention): Null pointer / null reference hazards, unhandled edge cases, off-by-one errors, unhandled task/thread cancellation, blocking async calls (.Result, .Wait()), thread-pool starvation, resource leaks (unclosed streams, unreleased connections, missing Dispose).
            - Pillar 3 (Input Validation & Business Boundaries): Missing null/empty/range validations on API request payloads, query arguments, and domain invariants; improper return status codes.
            - Pillar 4 (Performance & Concurrency): N+1 database queries, unbounded collections/queries, thread-safety hazards, race conditions, memory bloat, unnecessary locking.
-           - Pillar 5 (Maintainability & Error Handling): Swallowed exceptions, lost stack traces (throw ex; instead of throw;), sensitive PII in logs, lack of actionable error details.
+           - Pillar 5 (Maintainability & Code Hygiene): Swallowed exceptions, lost stack traces (throw ex; instead of throw;), misleading or missing log context, lack of actionable error details.
 
         3. NO SPECULATIVE "WHAT-IF" CRITIQUES:
            - You are STRICTLY FORBIDDEN from reporting issues based on hypothetical future changes (e.g., "if you add X in the future", "if someone changes this class later", "if future updates introduce mutable state").
@@ -59,6 +59,15 @@ public static class CodeReviewPrompt
            - If a bug is inside a method (e.g. an invalid if-statement, logic bug, or bad return value), target that exact statement line (e.g. the line with 'if' or 'return'), NOT the method's opening or closing brace.
            - If an issue is about method parameters, annotations, or missing method-level validations, target the method declaration line (e.g. 'public async Task<IActionResult> ...'), NEVER the opening '{'.
 
+        12. STRICT CATEGORY PRECEDENCE & DISAMBIGUATION (NO CATEGORY PING-PONG):
+           Assign each finding to exactly ONE of the 5 canonical categories using this strict priority order:
+           - "Security" (Priority 1): Passwords/credentials/tokens in logs (CWE-532), PII exposure, auth bypasses, injection, SSRF, XSS. (CRITICAL: Any log exposing passwords or user secrets MUST ALWAYS be categorized as "Security", NEVER Maintainability).
+           - "Reliability" (Priority 2): Unhandled exceptions, crashes, null reference hazards, unclosed streams/connections, panics, deadlocks.
+           - "Input Validation" (Priority 3): Missing null/empty/range validation on API request parameters or domain invariants without an immediate unhandled crash.
+           - "Performance" (Priority 4): N+1 database queries, unbounded collections/queries, thread contention, high latency.
+           - "Maintainability" (Priority 5): Swallowed exceptions, lost stack traces, poor logging hygiene, dead code.
+           - ONE FINDING PER DEFECT: Never report the same code line under multiple categories. If a defect touches multiple areas, classify it strictly under the highest-priority category above.
+
         PRIORITY CLASSIFICATION & NEW CODE RULES:
         Classify every finding into one of three strict levels according to these universal rules:
 
@@ -93,7 +102,7 @@ public static class CodeReviewPrompt
               "line": 42,
               "priority": "high|medium|low",
               "title": "Short descriptive title of the issue (e.g., Logging Sensitive Information, Null Reference on User Input, Unbounded Query Without Pagination)",
-              "category": "One of: Security, Performance, Reliability, Input Validation, Error Handling, Concurrency, Maintainability",
+              "category": "One of: Security, Reliability, Input Validation, Performance, Maintainability",
               "message": "Clear explanation of the concrete problem found in the code.",
               "why_it_matters": "One or two sentences explaining the real-world business or system impact (e.g., credential theft, data loss, service crash, compliance violation).",
               "suggested_fix": "The exact replacement source code line(s) that should replace the current line. ONLY the raw replacement code, no markdown fences, no explanation, no diff markers. This will be placed inside a GitHub suggestion block. If no code fix applies, set to null."
@@ -132,15 +141,17 @@ public static class CodeReviewPrompt
             {diffChunk}
 
             MANDATORY REVIEW INSTRUCTIONS:
-            1. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance/Concurrency, Error Handling).
-            2. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings, and do not stop after 4 or 5 findings. Report every defect discovered.
-            3. EXACT LINE TARGETING: Provide the file, exact line number, priority, concrete explanation of impact, and an actionable markdown code fix snippet. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
-            4. STRICT PRIORITY HIERARCHY:
+            1. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance, Maintainability).
+            2. MULTI-FILE AUDIT: When multiple files are included in this diff payload, audit EVERY file thoroughly. Never stop after reviewing the first file.
+            3. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings. Report every defect discovered.
+            4. EXACT LINE TARGETING: Provide the file, exact line number, priority, concrete explanation of impact, and an actionable markdown code fix snippet. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
+            5. STRICT CATEGORY PRECEDENCE: Categorize using Security > Reliability > Input Validation > Performance > Maintainability. Passwords, secrets, or PII in logs MUST ALWAYS be "Security". Never report duplicate findings on the same line.
+            6. STRICT PRIORITY HIERARCHY:
                - High: Real critical bugs, crashes, and security vulnerabilities ONLY.
                - Medium: Direct logic mistakes in the changed code. DO NOT demand adding new code, extra helper classes, or architectural rewrites.
                - Low: Optional suggestions to add new code or future improvements.
-            5. NO SPECULATION OR BIKESHEDDING: Review code strictly as written today. Never critique based on hypothetical future scenarios ("if in the future..."), and never suggest switching between valid equivalent design patterns.
-            6. Emit pure JSON strictly adhering to the schema (generate the 'findings' array first, followed by the executive 'summary').
+            7. NO SPECULATION OR BIKESHEDDING: Review code strictly as written today. Never critique based on hypothetical future scenarios ("if in the future..."), and never suggest switching between valid equivalent design patterns.
+            8. Emit pure JSON strictly adhering to the schema (generate the 'findings' array first, followed by the executive 'summary').
             """;
     }
 }

@@ -55,14 +55,17 @@ public sealed class GeminiOptions
 
     /// <summary>
     /// Maximum character length per diff chunk sent to Gemini.
+    /// Default is 500,000 chars (~125k tokens), allowing all changed files to be sent in a single API call
+    /// within Gemini's 1M+ token context window.
     /// </summary>
-    public int MaxChunkCharacters { get; set; } = 15000;
+    public int MaxChunkCharacters { get; set; } = 500_000;
 
     /// <summary>
     /// Maximum number of changed files to bundle into a single AI review chunk.
-    /// Setting this to 1 ensures each file gets an independent, dedicated review pass without being skipped or diluted.
+    /// Default is 50, allowing all changed files in the PR to be reviewed together in one unified API call
+    /// with full cross-file context awareness.
     /// </summary>
-    public int MaxFilesPerChunk { get; set; } = 1;
+    public int MaxFilesPerChunk { get; set; } = 50;
 
     /// <summary>
     /// Maximum line count in a file to include the full file as context.

@@ -452,9 +452,9 @@ public class GeminiReviewAnalyzerTests
     }
 
     [Fact]
-    public void BuildDiffChunks_ShouldDefaultToOneFilePerChunk_WhenUsingDefaultOptions()
+    public void BuildDiffChunks_ShouldBundleAllFilesInSingleChunk_WhenUsingDefaultOptions()
     {
-        // Arrange: 3 changed files with default GeminiOptions (MaxFilesPerChunk = 1)
+        // Arrange: 3 changed files with default GeminiOptions (MaxFilesPerChunk = 50)
         var files = Enumerable.Range(1, 3).Select(i => new PullRequestFileChange
         {
             FileName = $"Component{i}.cs",
@@ -470,7 +470,7 @@ public class GeminiReviewAnalyzerTests
             Owner = "owner",
             Repo = "repo",
             PullRequestNumber = 10,
-            Title = "Multi-file isolated chunks",
+            Title = "Multi-file unified chunk",
             Author = "author",
             BaseBranch = "main",
             HeadBranch = "feature",
@@ -478,14 +478,14 @@ public class GeminiReviewAnalyzerTests
             ChangedFiles = files
         };
 
-        // Act (using default options where MaxFilesPerChunk = 1)
-        var chunks = GeminiReviewAnalyzer.BuildDiffChunks(context, maxChunkSize: 50000);
+        // Act (using default options where all files bundle into 1 unified call)
+        var chunks = GeminiReviewAnalyzer.BuildDiffChunks(context, maxChunkSize: 500000);
 
-        // Assert: 3 files with MaxFilesPerChunk = 1 should produce exactly 3 chunks
-        chunks.Should().HaveCount(3);
+        // Assert: 3 files with default options should produce 1 unified chunk containing all files
+        chunks.Should().HaveCount(1);
         chunks[0].Should().Contain("Component1.cs");
-        chunks[1].Should().Contain("Component2.cs");
-        chunks[2].Should().Contain("Component3.cs");
+        chunks[0].Should().Contain("Component2.cs");
+        chunks[0].Should().Contain("Component3.cs");
     }
 
     [Fact]
@@ -691,5 +691,84 @@ public class GeminiReviewAnalyzerTests
         comment.Body.Should().Contain("**Suggested Fix:**");
         comment.Body.Should().Contain("```suggestion");
         comment.Body.Should().Contain("_logger.LogInformation(\"Processing login attempt for user '{Username}'.\", request.Username);");
+    }
+
+    [Fact]
+    public void DeduplicateComments_SameLineMultipleFindings_ShouldKeepHighestCategoryPrecedence()
+    {
+        // Arrange: Two findings on the exact same file and line
+        // One is labeled 'Maintainability' and the other is 'Security'
+        var comments = new List<ReviewComment>
+        {
+            new ReviewComment
+            {
+                FilePath = "Controllers/AuthController.cs",
+                Line = 38,
+                Body = "Maintainability finding",
+                Severity = AnalyzerSeverity.Error,
+                AnalyzerName = "Gemini AI",
+                Category = "Maintainability"
+            },
+            new ReviewComment
+            {
+                FilePath = "Controllers/AuthController.cs",
+                Line = 38,
+                Body = "Security finding",
+                Severity = AnalyzerSeverity.Error,
+                AnalyzerName = "Gemini AI",
+                Category = "Security"
+            }
+        };
+
+        // Act
+        var deduplicated = GeminiReviewAnalyzer.DeduplicateComments(comments);
+
+        // Assert: Exactly one finding remains, and it MUST be the Security one (Priority 1)
+        deduplicated.Should().ContainSingle();
+        deduplicated[0].Category.Should().Be("Security");
+        deduplicated[0].Body.Should().Be("Security finding");
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_WithModelName_ShouldIncludeModelInAnalyzerName()
+    {
+        // Arrange
+        var json = """
+        {
+          "findings": [
+            {
+              "file": "Service.cs",
+              "line": 10,
+              "priority": "high",
+              "title": "Bug",
+              "category": "Reliability",
+              "message": "Null ref."
+            }
+          ],
+          "summary": "Done"
+        }
+        """;
+
+        // Act
+        var (comments, _) = _analyzer.ParseGeminiResponse(json, modelName: "gemini-flash-lite-latest");
+
+        // Assert
+        comments.Should().ContainSingle();
+        comments[0].AnalyzerName.Should().Be("Gemini AI (gemini-flash-lite-latest)");
+    }
+
+    [Fact]
+    public void CodeReviewPrompt_ShouldContainCategoryPrecedenceAndPIIUnderSecurity()
+    {
+        // Assert
+        var instruction = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.SystemInstruction;
+        instruction.Should().Contain("STRICT CATEGORY PRECEDENCE & DISAMBIGUATION");
+        instruction.Should().Contain("passwords or sensitive PII in logs (CWE-532)");
+        instruction.Should().Contain("Security\" (Priority 1)");
+        instruction.Should().Contain("Reliability\" (Priority 2)");
+
+        var userMsg = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.BuildUserMessage("Title", "author", "diff");
+        userMsg.Should().Contain("STRICT CATEGORY PRECEDENCE");
+        userMsg.Should().Contain("MULTI-FILE AUDIT");
     }
 }

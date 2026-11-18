@@ -123,8 +123,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
             if (!string.IsNullOrWhiteSpace(jsonResponse))
             {
-                var (parsedComments, summary) = ParseGeminiResponse(jsonResponse, context);
-                _logger.LogInformation("Chunk {Index}/{Total}: Extracted {Count} finding(s).", i + 1, chunks.Count, parsedComments.Count);
+                var (parsedComments, summary) = ParseGeminiResponse(jsonResponse, context, currentWorkingModel);
+                _logger.LogInformation("Chunk {Index}/{Total}: Extracted {Count} finding(s) using model '{Model}'.", i + 1, chunks.Count, parsedComments.Count, currentWorkingModel);
                 comments.AddRange(parsedComments);
 
                 if (!string.IsNullOrWhiteSpace(summary))
@@ -144,15 +144,44 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             Summary = string.Join("\n\n", summaries);
         }
 
-        var sortedComments = comments
-            .OrderByDescending(c => c.Severity) // High (Error) -> Medium (Warning) -> Low (Info)
+        var sortedComments = DeduplicateComments(comments);
+
+        _logger.LogInformation("Gemini AI review finished. Generated {Count} issue(s) after deduplication.", sortedComments.Count);
+        return sortedComments;
+    }
+
+    /// <summary>
+    /// Deduplicates review comments targeting the same line of code in the same file.
+    /// When multiple findings target the same line, retains the one with highest severity (Error > Warning > Info).
+    /// Ties are broken by highest category rank (Security > Reliability > Input Validation > Performance > Maintainability).
+    /// </summary>
+    public static List<ReviewComment> DeduplicateComments(IEnumerable<ReviewComment> comments)
+    {
+        return comments
+            .GroupBy(c => (FilePath: c.FilePath.ToLowerInvariant(), c.Line))
+            .Select(group => group
+                .OrderByDescending(c => c.Severity) // High (Error) -> Medium (Warning) -> Low (Info)
+                .ThenBy(c => GetCategoryRank(c.Category)) // Security (1) > Reliability (2) > Input Validation (3) > Performance (4) > Maintainability (5)
+                .First())
+            .OrderByDescending(c => c.Severity)
             .ThenBy(c => c.FilePath)
             .ThenBy(c => c.Line)
             .ToList();
-
-        _logger.LogInformation("Gemini AI review finished. Generated {Count} issue(s).", sortedComments.Count);
-        return sortedComments;
     }
+
+    /// <summary>
+    /// Returns numerical priority rank for canonical review categories (lower = higher priority).
+    /// Ensures Security issues always take precedence over Reliability, which takes precedence over Maintainability.
+    /// </summary>
+    public static int GetCategoryRank(string? category) => (category?.ToLowerInvariant()) switch
+    {
+        "security" => 1,
+        "reliability" => 2,
+        "input validation" => 3,
+        "performance" or "concurrency" => 4,
+        "maintainability" or "error handling" => 5,
+        _ => 6
+    };
 
     public static List<string> BuildDiffChunks(PullRequestContext context, int maxChunkSize)
     {
@@ -317,10 +346,11 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         CommentHandling = JsonCommentHandling.Skip
     };
 
-    public (List<ReviewComment> Comments, string? Summary) ParseGeminiResponse(string json, PullRequestContext? context = null)
+    public (List<ReviewComment> Comments, string? Summary) ParseGeminiResponse(string json, PullRequestContext? context = null, string? modelName = null)
     {
         var comments = new List<ReviewComment>();
         string? summary = null;
+        var analyzerLabel = !string.IsNullOrWhiteSpace(modelName) ? $"Gemini AI ({modelName})" : Name;
 
         var cleanJson = json.Trim();
         if (cleanJson.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
@@ -414,7 +444,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         DiffPosition = diffPosition,
                         Body = body,
                         Severity = severity,
-                        AnalyzerName = Name,
+                        AnalyzerName = analyzerLabel,
                         Title = title,
                         Category = category,
                         WhyItMatters = whyItMatters,
@@ -426,7 +456,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Standard JsonDocument.Parse failed on sanitized JSON. Attempting fallback regex parser...");
-            return FallbackRegexParse(sanitizedJson, context);
+            return FallbackRegexParse(sanitizedJson, context, modelName);
         }
 
         return (comments, summary);
@@ -502,10 +532,11 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
     /// <summary>
     /// Fallback parser using regular expressions to extract findings and summary when JsonDocument fails on malformed JSON.
     /// </summary>
-    private (List<ReviewComment> Comments, string? Summary) FallbackRegexParse(string json, PullRequestContext? context)
+    private (List<ReviewComment> Comments, string? Summary) FallbackRegexParse(string json, PullRequestContext? context, string? modelName = null)
     {
         var comments = new List<ReviewComment>();
         string? summary = null;
+        var analyzerLabel = !string.IsNullOrWhiteSpace(modelName) ? $"Gemini AI ({modelName})" : Name;
 
         var summaryMatch = Regex.Match(json, @"""summary""\s*:\s*""(?<s>(?:\\.|[^""\\])*)""", RegexOptions.Singleline);
         if (summaryMatch.Success)
@@ -565,7 +596,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 DiffPosition = diffPosition,
                 Body = body,
                 Severity = severity,
-                AnalyzerName = Name
+                AnalyzerName = analyzerLabel
             });
         }
 
