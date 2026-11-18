@@ -68,24 +68,28 @@ public static class CodeReviewPrompt
            - "Maintainability" (Priority 5): Swallowed exceptions, lost stack traces, poor logging hygiene, dead code.
            - ONE FINDING PER DEFECT: Never report the same code line under multiple categories. If a defect touches multiple areas, classify it strictly under the highest-priority category above.
 
-        PRIORITY CLASSIFICATION & NEW CODE RULES:
-        Classify every finding into one of three strict levels according to these universal rules:
+        PRIORITY CLASSIFICATION (4-TIER AI-DRIVEN IMPACT HIERARCHY):
+        You (the AI Team Lead) decide the priority of every finding based on its real-world blast radius and exploitability:
 
-        - "high" (Critical Bug / Security Blocker):
-          * Reserved EXCLUSIVELY for severe, verifiable bugs and security vulnerabilities in the modified code:
-            - Security flaws (OWASP Top 10, SQL/command/script injection, authentication/authorization bypasses, hardcoded secrets/API keys/tokens, insecure deserialization, SSRF).
-            - Immediate crash hazards (unhandled null pointer/null reference exceptions, unhandled boundary exceptions, unhandled panics, thread-pool deadlocks).
-            - Active data loss, memory corruption, or concurrency race conditions.
-          * If an issue does not cause an immediate crash, data breach, or security hole today, it is NOT High priority.
+        - "critical" (Critical Blocker - Must Resolve Before Merge):
+          * Exploitable security vulnerabilities (OWASP Top 10, SQL/command injection, authentication/authorization bypasses, hardcoded secrets/API keys/tokens, SSRF, insecure deserialization).
+          * Plaintext passwords or sensitive PII exposed in logs (CWE-532).
+          * Unhandled exceptions causing service outages or crashes on primary workflows, thread deadlocks, or active data loss/corruption.
 
-        - "medium" (Direct Logic Flaws in Changed Code — NO DEMANDING NEW CODE):
-          * Reserved for direct defects, errors, or missed edge cases in the logic the author actually wrote (e.g. inverted conditions, off-by-one errors, incorrect return values, unclosed resources opened in this change).
-          * STRICT PROHIBITION: You are STRICTLY FORBIDDEN from asking the author to write brand new code, create new classes, build new helper methods, or introduce new architecture under Medium priority. Review ONLY what was written.
+        - "high" (High Priority - Severe Functional Defect):
+          * Major logic defects in core business flows, broken transaction boundaries, unhandled edge-case crashes.
+          * Concurrency race conditions, severe resource/memory leaks, unhandled task cancellation causing hanging requests.
 
-        - "low" (Optional Suggestions & Ideas for New Code):
-          * Any suggestion or idea to add NEW code, new helper functions, new validation layers, or design improvements belongs strictly in Low priority.
-          * Suggestions for modern idiomatic language patterns, readability enhancements, or extra unit test scenarios.
-          * Must be explicitly framed as optional: "(Optional suggestion — does not block or require changing this PR)".
+        - "medium" (Medium Priority - Direct Logic Flaws in Changed Code):
+          * Inverted boolean conditions, off-by-one errors, incorrect calculation or return values, unclosed disposable resources.
+          * Missing null/empty/range validations on request DTOs where bad data is processed without an immediate crash.
+          * Improper HTTP status codes or missing error handling details.
+          * STRICT PROHIBITION: Do NOT demand author write brand-new classes or architectural rewrites under Medium priority.
+
+        - "low" (Low Priority - Optional Suggestions & Code Health):
+          * Non-critical performance optimizations, modern idiomatic language patterns, readability enhancements, extra test scenarios.
+          * Any suggestion to introduce new helper methods or architecture belongs strictly in Low priority.
+          * Frame explicitly as optional: "(Optional suggestion — does not block this PR)".
 
         RESPONSE REQUIREMENTS:
         - You MUST respond with pure, valid JSON adhering to the exact schema below.
@@ -100,7 +104,7 @@ public static class CodeReviewPrompt
             {
               "file": "path/to/file.ext",
               "line": 42,
-              "priority": "high|medium|low",
+              "priority": "critical|high|medium|low",
               "title": "Short descriptive title of the issue (e.g., Logging Sensitive Information, Null Reference on User Input, Unbounded Query Without Pagination)",
               "category": "One of: Security, Reliability, Input Validation, Performance, Maintainability",
               "message": "Clear explanation of the concrete problem found in the code.",
@@ -146,10 +150,11 @@ public static class CodeReviewPrompt
             3. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings. Report every defect discovered.
             4. EXACT LINE TARGETING: Provide the file, exact line number, priority, concrete explanation of impact, and an actionable markdown code fix snippet. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
             5. STRICT CATEGORY PRECEDENCE: Categorize using Security > Reliability > Input Validation > Performance > Maintainability. Passwords, secrets, or PII in logs MUST ALWAYS be "Security". Never report duplicate findings on the same line.
-            6. STRICT PRIORITY HIERARCHY:
-               - High: Real critical bugs, crashes, and security vulnerabilities ONLY.
-               - Medium: Direct logic mistakes in the changed code. DO NOT demand adding new code, extra helper classes, or architectural rewrites.
-               - Low: Optional suggestions to add new code or future improvements.
+            6. 4-TIER PRIORITY HIERARCHY:
+               - Critical: Exploitable security vulnerabilities, plaintext passwords/PII in logs (CWE-532), production-halting crashes.
+               - High: Major logic defects in core business flows, broken transaction boundaries, thread deadlocks.
+               - Medium: Direct logic mistakes in changed code, off-by-one errors, unclosed resources, wrong status codes.
+               - Low: Optional suggestions for improvements, idiomatic patterns, non-critical optimizations.
             7. NO SPECULATION OR BIKESHEDDING: Review code strictly as written today. Never critique based on hypothetical future scenarios ("if in the future..."), and never suggest switching between valid equivalent design patterns.
             8. Emit pure JSON strictly adhering to the schema (generate the 'findings' array first, followed by the executive 'summary').
             """;

@@ -116,11 +116,11 @@ public class GeminiReviewAnalyzerTests
         summary.Should().Be("Review complete.");
         comments.Should().HaveCount(3);
         comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
-        comments[0].Body.Should().Contain("[CRITICAL]");
+        comments[0].Body.Should().Contain("[HIGH]");
         comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
-        comments[1].Body.Should().Contain("[WARNING]");
+        comments[1].Body.Should().Contain("[MEDIUM]");
         comments[2].Severity.Should().Be(AnalyzerSeverity.Info);
-        comments[2].Body.Should().Contain("[SUGGESTION]");
+        comments[2].Body.Should().Contain("[LOW]");
     }
 
     [Fact]
@@ -438,17 +438,17 @@ public class GeminiReviewAnalyzerTests
         comments[0].FilePath.Should().Be("src/Security/TokenService.cs");
         comments[0].Line.Should().Be(45);
         comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
-        comments[0].Body.Should().Contain("[CRITICAL]");
+        comments[0].Body.Should().Contain("[HIGH]");
 
         comments[1].FilePath.Should().Be("src/Controllers/OrdersController.cs");
         comments[1].Line.Should().Be(88);
         comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
-        comments[1].Body.Should().Contain("[WARNING]");
+        comments[1].Body.Should().Contain("[MEDIUM]");
 
         comments[2].FilePath.Should().Be("src/Controllers/OrdersController.cs");
         comments[2].Line.Should().Be(105);
         comments[2].Severity.Should().Be(AnalyzerSeverity.Info);
-        comments[2].Body.Should().Contain("[SUGGESTION]");
+        comments[2].Body.Should().Contain("[LOW]");
     }
 
     [Fact]
@@ -517,13 +517,14 @@ public class GeminiReviewAnalyzerTests
         instruction.Should().Contain("THE \"PROVE THE BUG\" TEST");
 
         // Priority and new code rules
-        instruction.Should().Contain("high\" (Critical Bug / Security Blocker)");
-        instruction.Should().Contain("medium\" (Direct Logic Flaws in Changed Code — NO DEMANDING NEW CODE)");
-        instruction.Should().Contain("low\" (Optional Suggestions & Ideas for New Code)");
+        instruction.Should().Contain("critical\" (Critical Blocker");
+        instruction.Should().Contain("high\" (High Priority");
+        instruction.Should().Contain("medium\" (Medium Priority");
+        instruction.Should().Contain("low\" (Low Priority");
 
         // UserMessage instructions
         var userMsg = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.BuildUserMessage("Title", "author", "diff");
-        userMsg.Should().Contain("STRICT PRIORITY HIERARCHY");
+        userMsg.Should().Contain("4-TIER PRIORITY HIERARCHY");
         userMsg.Should().Contain("NO SPECULATION OR BIKESHEDDING");
     }
 
@@ -656,7 +657,7 @@ public class GeminiReviewAnalyzerTests
             {
               "file": "Controllers/AuthController.cs",
               "line": 38,
-              "priority": "high",
+              "priority": "critical",
               "title": "Logging Sensitive Information (Plaintext Password PII)",
               "category": "Security",
               "message": "The application logs the user's plaintext password directly via structured logging (_logger.LogInformation(... request.Password)).",
@@ -770,5 +771,73 @@ public class GeminiReviewAnalyzerTests
         var userMsg = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.BuildUserMessage("Title", "author", "diff");
         userMsg.Should().Contain("STRICT CATEGORY PRECEDENCE");
         userMsg.Should().Contain("MULTI-FILE AUDIT");
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_WithFourPriorityTiers_ShouldMapAccurately()
+    {
+        // Arrange
+        var json = """
+        {
+          "summary": "Full review with 4 distinct priority tiers.",
+          "findings": [
+            {
+              "file": "src/Auth.cs",
+              "line": 10,
+              "priority": "critical",
+              "title": "Plaintext Password Logging",
+              "category": "Security",
+              "message": "Logs sensitive secrets."
+            },
+            {
+              "file": "src/Payment.cs",
+              "line": 20,
+              "priority": "high",
+              "title": "Race Condition in Checkout",
+              "category": "Reliability",
+              "message": "Double charge risk."
+            },
+            {
+              "file": "src/User.cs",
+              "line": 30,
+              "priority": "medium",
+              "title": "Missing Range Validation",
+              "category": "Input Validation",
+              "message": "Age can be negative."
+            },
+            {
+              "file": "src/Helper.cs",
+              "line": 40,
+              "priority": "low",
+              "title": "Use String Interpolation",
+              "category": "Maintainability",
+              "message": "Optional style improvement."
+            }
+          ]
+        }
+        """;
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json);
+
+        // Assert
+        summary.Should().Be("Full review with 4 distinct priority tiers.");
+        comments.Should().HaveCount(4);
+
+        // Tier 1: Critical
+        comments[0].Severity.Should().Be(AnalyzerSeverity.Critical);
+        comments[0].Body.Should().Contain("🚨 **[CRITICAL]**");
+
+        // Tier 2: High
+        comments[1].Severity.Should().Be(AnalyzerSeverity.High);
+        comments[1].Body.Should().Contain("🔴 **[HIGH]**");
+
+        // Tier 2: Medium
+        comments[2].Severity.Should().Be(AnalyzerSeverity.Medium);
+        comments[2].Body.Should().Contain("⚠️ **[MEDIUM]**");
+
+        // Tier 4: Low
+        comments[3].Severity.Should().Be(AnalyzerSeverity.Low);
+        comments[3].Body.Should().Contain("💡 **[LOW]**");
     }
 }

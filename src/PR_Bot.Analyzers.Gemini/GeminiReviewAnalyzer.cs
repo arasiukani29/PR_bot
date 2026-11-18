@@ -395,7 +395,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
                     var severity = (priorityStr?.ToLowerInvariant()) switch
                     {
-                        "high" or "error" or "critical" => AnalyzerSeverity.Error,
+                        "critical" => AnalyzerSeverity.Critical,
+                        "high" or "error" => AnalyzerSeverity.Error,
                         "low" or "info" => AnalyzerSeverity.Info,
                         _ => AnalyzerSeverity.Warning
                     };
@@ -480,9 +481,10 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         // Header line: severity icon + title
         var (severityLabel, severityIcon) = severity switch
         {
-            AnalyzerSeverity.Error => ("CRITICAL", "🚨"),
-            AnalyzerSeverity.Warning => ("WARNING", "⚠️"),
-            _ => ("SUGGESTION", "💡")
+            AnalyzerSeverity.Critical => ("CRITICAL", "🚨"),
+            AnalyzerSeverity.Error => ("HIGH", "🔴"),
+            AnalyzerSeverity.Warning => ("MEDIUM", "⚠️"),
+            _ => ("LOW", "💡")
         };
 
         if (!string.IsNullOrWhiteSpace(title))
@@ -559,7 +561,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
             var severity = (priorityStr.ToLowerInvariant()) switch
             {
-                "high" or "error" or "critical" => AnalyzerSeverity.Error,
+                "critical" => AnalyzerSeverity.Critical,
+                "high" or "error" => AnalyzerSeverity.Error,
                 "low" or "info" => AnalyzerSeverity.Info,
                 _ => AnalyzerSeverity.Warning
             };

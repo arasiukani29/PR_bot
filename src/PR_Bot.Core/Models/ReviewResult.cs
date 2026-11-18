@@ -7,22 +7,23 @@ public sealed class ReviewResult
 {
     public List<ReviewComment> Comments { get; init; } = [];
     public string? SummaryMarkdown { get; set; }
-    public bool HasErrors => Comments.Any(c => c.Severity == AnalyzerSeverity.Error);
+    public bool HasErrors => Comments.Any(c => c.Severity >= AnalyzerSeverity.Error);
     public bool HasWarnings => Comments.Any(c => c.Severity == AnalyzerSeverity.Warning);
+
+    public int CriticalCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Critical);
+    public int HighCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Error);
+    public int MediumCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
+    public int LowCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Info);
 
     /// <summary>
     /// Calculated code health score from 0 (critical defects) to 100 (clean code).
-    /// Deductions: High priority (-25), Medium priority (-10), Low priority (-3).
+    /// Deductions: Critical (-30), High priority (-25), Medium priority (-10), Low priority (-3).
     /// </summary>
     public int HealthScore
     {
         get
         {
-            int highCount = Comments.Count(c => c.Severity == AnalyzerSeverity.Error);
-            int mediumCount = Comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
-            int lowCount = Comments.Count(c => c.Severity == AnalyzerSeverity.Info);
-
-            int deduction = (highCount * 25) + (mediumCount * 10) + (lowCount * 3);
+            int deduction = (CriticalCount * 30) + (HighCount * 25) + (MediumCount * 10) + (LowCount * 3);
             return Math.Max(0, 100 - deduction);
         }
     }

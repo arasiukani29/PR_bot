@@ -269,9 +269,10 @@ public sealed class GitHubService : IGitHubService
 
     public static string BuildReviewMarkdown(PullRequestContext context, ReviewResult result)
     {
-        var highCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Error);
-        var mediumCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
-        var lowCount = result.Comments.Count(c => c.Severity == AnalyzerSeverity.Info);
+        var criticalCount = result.CriticalCount;
+        var highCount = result.HighCount;
+        var mediumCount = result.MediumCount;
+        var lowCount = result.LowCount;
 
         var sb = new StringBuilder();
 
@@ -297,9 +298,10 @@ public sealed class GitHubService : IGitHubService
         sb.AppendLine("```");
         sb.AppendLine();
 
-        // Priority Metrics Table
+        // Priority Metrics Table (4 Tiers)
         sb.AppendLine("| Status | Priority Level | Issues |");
         sb.AppendLine("|:------:|:---------------|:------:|");
+        sb.AppendLine($"| {(criticalCount > 0 ? "🚨" : "✅")} | 🚨 **Critical** (Immediate Blocker) | **{criticalCount}** |");
         sb.AppendLine($"| {(highCount > 0 ? "🔴" : "✅")} | 🔴 **High Priority** (Must Resolve) | **{highCount}** |");
         sb.AppendLine($"| {(mediumCount > 0 ? "🟡" : "✅")} | 🟡 **Medium Priority** (Should Resolve) | **{mediumCount}** |");
         sb.AppendLine($"| {(lowCount > 0 ? "🟢" : "✅")} | 🟢 **Low Priority** (Suggestions) | **{lowCount}** |");
@@ -322,13 +324,14 @@ public sealed class GitHubService : IGitHubService
 
             var priorityGroups = result.Comments
                 .GroupBy(c => c.Severity)
-                .OrderByDescending(g => g.Key); // High (Error) -> Medium (Warning) -> Low (Info)
+                .OrderByDescending(g => g.Key); // Critical -> High -> Medium -> Low
 
             foreach (var group in priorityGroups)
             {
                 var (title, icon) = group.Key switch
                 {
-                    AnalyzerSeverity.Error => ("🔴 High Priority Issues (Must Resolve Before Merge)", "🚨"),
+                    AnalyzerSeverity.Critical => ("🚨 Critical Blockers (Immediate Security/Crash Hazards)", "🚨"),
+                    AnalyzerSeverity.Error => ("🔴 High Priority Issues (Must Resolve Before Merge)", "🔴"),
                     AnalyzerSeverity.Warning => ("🟡 Medium Priority Issues (Recommended to Fix)", "⚠️"),
                     _ => ("🟢 Low Priority Suggestions (Improvements)", "💡")
                 };
@@ -351,7 +354,7 @@ public sealed class GitHubService : IGitHubService
             }
         }
 
-        if (highCount == 0 && mediumCount == 0 && lowCount == 0)
+        if (criticalCount == 0 && highCount == 0 && mediumCount == 0 && lowCount == 0)
         {
             sb.AppendLine("✨ **No code quality or security issues detected! Clean PR.** 🎉");
             sb.AppendLine();
