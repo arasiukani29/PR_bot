@@ -36,11 +36,11 @@ public sealed class GeminiOptions
     /// </summary>
     public string[] FallbackModels { get; set; } =
     [
-        "gemini-flash-lite-latest",      // Auto-updating alias — always newest Flash-Lite (primary)
-        "gemini-3.8-flash",              // Current pinned workhorse, free tier
-        "gemini-3.6-flash",              // Previous gen, free tier, still active
-        "gemini-3.5-flash-lite",         // Lightweight free-tier option
-        "gemini-2.5-flash"               // Older stable safety net
+        "gemini-flash-lite-latest",      // Primary stable model (high availability)
+        "gemini-2.5-flash",              // High availability stable fallback
+        "gemini-3.8-flash",              // Deep reasoning fallback (tried when capacity permits)
+        "gemini-3.6-flash",              // Previous generation fallback
+        "gemini-3.5-flash-lite"          // Lightweight fallback
     ];
 
     /// <summary>
@@ -57,6 +57,12 @@ public sealed class GeminiOptions
     /// Maximum character length per diff chunk sent to Gemini.
     /// </summary>
     public int MaxChunkCharacters { get; set; } = 15000;
+
+    /// <summary>
+    /// Maximum number of changed files to bundle into a single AI review chunk.
+    /// Setting this to 1 ensures each file gets an independent, dedicated review pass without being skipped or diluted.
+    /// </summary>
+    public int MaxFilesPerChunk { get; set; } = 1;
 
     /// <summary>
     /// Maximum line count in a file to include the full file as context.

@@ -185,7 +185,8 @@ public class GeminiReviewAnalyzerTests
         message.Should().Contain("Add payment integration");
         message.Should().Contain("@developer1");
         message.Should().Contain("Please review specifically for concurrency safety and token leaks.");
-        message.Should().Contain("Return ALL findings on this first review pass");
+        message.Should().Contain("Return ALL findings");
+        message.Should().Contain("single review pass");
     }
 
     [Fact]
@@ -332,5 +333,176 @@ public class GeminiReviewAnalyzerTests
         comments[0].Line.Should().Be(33);
         comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
         comments[0].Body.Should().Contain("Unauthorized()");
+    }
+
+    [Fact]
+    public void FindClosestDiffPosition_ShouldSnapToNearestHunkLine_WhenTargetLineOutsideExactDiff()
+    {
+        // Arrange: Diff only contains lines 30 to 35
+        var patch = """
+            @@ -30,2 +30,4 @@
+             int a = 1;
+            +int b = 2;
+            +int c = 3;
+             int d = 4;
+            """;
+
+        // Act: Gemini points to line 25 (outside hunk) or line 50
+        var closestTo25 = GeminiReviewAnalyzer.FindClosestDiffPosition(patch, 25);
+        var closestTo50 = GeminiReviewAnalyzer.FindClosestDiffPosition(patch, 50);
+
+        // Assert: Nearest diff line should be found instead of returning null and losing the comment
+        closestTo25.Should().NotBeNull();
+        closestTo50.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void BuildDiffChunks_ShouldSplitByMaxFilesPerChunk_WhenConfigured()
+    {
+        // Arrange: 5 changed files with MaxFilesPerChunk = 2
+        var files = Enumerable.Range(1, 5).Select(i => new PullRequestFileChange
+        {
+            FileName = $"Service{i}.cs",
+            Status = "modified",
+            Additions = 1,
+            Deletions = 0,
+            Changes = 1,
+            Patch = "@@ -1,1 +1,2 @@\n a\n+b\n"
+        }).ToList();
+
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 1,
+            Title = "Multi-file PR",
+            Author = "author",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            ChangedFiles = files
+        };
+
+        var options = new GeminiOptions
+        {
+            MaxChunkCharacters = 100000,
+            MaxFilesPerChunk = 2
+        };
+
+        // Act
+        var chunks = GeminiReviewAnalyzer.BuildDiffChunks(context, 100000, options);
+
+        // Assert: 5 files / 2 per chunk = 3 chunks (2, 2, 1)
+        chunks.Should().HaveCount(3);
+        chunks[0].Should().Contain("Service1.cs").And.Contain("Service2.cs");
+        chunks[1].Should().Contain("Service3.cs").And.Contain("Service4.cs");
+        chunks[2].Should().Contain("Service5.cs");
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_ShouldParseInvertedJson_WithFindingsBeforeSummary()
+    {
+        // Arrange (Inverted JSON where findings array comes before summary)
+        var json = """
+        {
+          "findings": [
+            {
+              "file": "src/Security/TokenService.cs",
+              "line": 45,
+              "priority": "high",
+              "message": "Potential hardcoded JWT secret key."
+            },
+            {
+              "file": "src/Controllers/OrdersController.cs",
+              "line": 88,
+              "priority": "medium",
+              "message": "Missing null check on request.Items list."
+            },
+            {
+              "file": "src/Controllers/OrdersController.cs",
+              "line": 105,
+              "priority": "low",
+              "message": "Consider using pattern matching."
+            }
+          ],
+          "summary": "Audited token service and orders controller with 3 findings identified."
+        }
+        """;
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json);
+
+        // Assert
+        summary.Should().Be("Audited token service and orders controller with 3 findings identified.");
+        comments.Should().HaveCount(3);
+        comments[0].FilePath.Should().Be("src/Security/TokenService.cs");
+        comments[0].Line.Should().Be(45);
+        comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
+        comments[0].Body.Should().Contain("[HIGH PRIORITY]");
+
+        comments[1].FilePath.Should().Be("src/Controllers/OrdersController.cs");
+        comments[1].Line.Should().Be(88);
+        comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
+        comments[1].Body.Should().Contain("[MEDIUM PRIORITY]");
+
+        comments[2].FilePath.Should().Be("src/Controllers/OrdersController.cs");
+        comments[2].Line.Should().Be(105);
+        comments[2].Severity.Should().Be(AnalyzerSeverity.Info);
+        comments[2].Body.Should().Contain("[LOW PRIORITY]");
+    }
+
+    [Fact]
+    public void BuildDiffChunks_ShouldDefaultToOneFilePerChunk_WhenUsingDefaultOptions()
+    {
+        // Arrange: 3 changed files with default GeminiOptions (MaxFilesPerChunk = 1)
+        var files = Enumerable.Range(1, 3).Select(i => new PullRequestFileChange
+        {
+            FileName = $"Component{i}.cs",
+            Status = "modified",
+            Additions = 2,
+            Deletions = 0,
+            Changes = 2,
+            Patch = "@@ -1,1 +1,3 @@\n a\n+b\n+c\n"
+        }).ToList();
+
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 10,
+            Title = "Multi-file isolated chunks",
+            Author = "author",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            ChangedFiles = files
+        };
+
+        // Act (using default options where MaxFilesPerChunk = 1)
+        var chunks = GeminiReviewAnalyzer.BuildDiffChunks(context, maxChunkSize: 50000);
+
+        // Assert: 3 files with MaxFilesPerChunk = 1 should produce exactly 3 chunks
+        chunks.Should().HaveCount(3);
+        chunks[0].Should().Contain("Component1.cs");
+        chunks[1].Should().Contain("Component2.cs");
+        chunks[2].Should().Contain("Component3.cs");
+    }
+
+    [Fact]
+    public void CodeReviewPrompt_ShouldContainFivePillarsAndZeroWithholdingRule()
+    {
+        // Assert SystemInstruction contains 5 review pillars and zero-withholding rule
+        var instruction = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.SystemInstruction;
+        instruction.Should().Contain("ZERO-WITHHOLDING POLICY");
+        instruction.Should().Contain("Pillar 1 (Security");
+        instruction.Should().Contain("Pillar 2 (Reliability");
+        instruction.Should().Contain("Pillar 3 (Input Validation");
+        instruction.Should().Contain("Pillar 4 (Performance");
+        instruction.Should().Contain("Pillar 5 (Maintainability");
+
+        // Assert UserMessage reinforces the rule
+        var userMsg = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.BuildUserMessage("Title", "author", "diff");
+        userMsg.Should().Contain("ZERO-WITHHOLDING RULE");
+        userMsg.Should().Contain("5 review pillars");
     }
 }

@@ -160,9 +160,11 @@ public sealed class GitHubService : IGitHubService
             {
                 var body = $"{comment.Body}\n\n<sub>Reported by {comment.AnalyzerName}</sub>";
 
+                // Check if this exact finding has already been posted to avoid duplicate spam across runs
+                var snippet = comment.Body.Length > 80 ? comment.Body[..80] : comment.Body;
                 bool isDuplicate = existingComments.Any(e =>
                     e.Path.Equals(comment.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                    (e.Body.Contains(comment.Body) || (e.Position == comment.DiffPosition.Value && e.Body.Contains(comment.AnalyzerName))));
+                    (e.Body.Contains(comment.Body) || e.Body.Contains(snippet)));
 
                 if (!isDuplicate)
                 {

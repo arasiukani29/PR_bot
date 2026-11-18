@@ -124,6 +124,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             if (!string.IsNullOrWhiteSpace(jsonResponse))
             {
                 var (parsedComments, summary) = ParseGeminiResponse(jsonResponse, context);
+                _logger.LogInformation("Chunk {Index}/{Total}: Extracted {Count} finding(s).", i + 1, chunks.Count, parsedComments.Count);
                 comments.AddRange(parsedComments);
 
                 if (!string.IsNullOrWhiteSpace(summary))
@@ -163,6 +164,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         var chunks = new List<string>();
         var currentChunk = new StringBuilder();
         var opts = options ?? new GeminiOptions();
+        int filesInChunk = 0;
 
         foreach (var file in context.ChangedFiles)
         {
@@ -173,10 +175,14 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
             var filePayload = BuildFileContext(file, opts) + "\n\n";
 
-            if (currentChunk.Length + filePayload.Length > maxChunkSize && currentChunk.Length > 0)
+            bool exceedsChars = (currentChunk.Length + filePayload.Length > maxChunkSize && currentChunk.Length > 0);
+            bool exceedsFiles = (filesInChunk >= opts.MaxFilesPerChunk && currentChunk.Length > 0);
+
+            if (exceedsChars || exceedsFiles)
             {
                 chunks.Add(currentChunk.ToString());
                 currentChunk.Clear();
+                filesInChunk = 0;
             }
 
             if (filePayload.Length > maxChunkSize && currentChunk.Length == 0)
@@ -186,6 +192,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             }
 
             currentChunk.Append(filePayload);
+            filesInChunk++;
         }
 
         if (currentChunk.Length > 0)
@@ -385,6 +392,10 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         {
                             resolvedFile = matchingFile.FileName;
                             diffPosition = FindDiffPosition(matchingFile.Patch, line);
+                            if (!diffPosition.HasValue)
+                            {
+                                diffPosition = FindClosestDiffPosition(matchingFile.Patch, line);
+                            }
                         }
                     }
 
@@ -463,6 +474,10 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 {
                     resolvedFile = matchingFile.FileName;
                     diffPosition = FindDiffPosition(matchingFile.Patch, line);
+                    if (!diffPosition.HasValue)
+                    {
+                        diffPosition = FindClosestDiffPosition(matchingFile.Patch, line);
+                    }
                 }
             }
 
@@ -595,5 +610,62 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// When a reported line does not fall exactly on a modified line in the patch hunk,
+    /// finds the closest available modified/context line position in the patch so the inline comment
+    /// is placed as close to the issue as possible rather than being dropped.
+    /// </summary>
+    public static int? FindClosestDiffPosition(string? patch, int targetLine)
+    {
+        if (string.IsNullOrWhiteSpace(patch)) return null;
+
+        var lines = patch.Split('\n');
+        int currentLine = 0;
+        int diffPosition = 0;
+        bool foundFirstHunk = false;
+
+        int? closestDiffPos = null;
+        int minDistance = int.MaxValue;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimEnd('\r');
+            var match = HunkRegex.Match(line);
+            if (match.Success)
+            {
+                foundFirstHunk = true;
+                currentLine = int.Parse(match.Groups[1].Value);
+                diffPosition++;
+                continue;
+            }
+
+            if (!foundFirstHunk) continue;
+            diffPosition++;
+
+            if (line.StartsWith('+') && !line.StartsWith("+++"))
+            {
+                int distance = Math.Abs(currentLine - targetLine);
+                if (distance < minDistance)
+                {
+                    minDistance = distance;
+                    closestDiffPos = diffPosition;
+                }
+                currentLine++;
+            }
+            else if (line.StartsWith(' '))
+            {
+                int distance = Math.Abs(currentLine - targetLine);
+                if (distance < minDistance)
+                {
+                    minDistance = distance;
+                    closestDiffPos = diffPosition;
+                }
+                currentLine++;
+            }
+        }
+
+        return closestDiffPos;
     }
 }
