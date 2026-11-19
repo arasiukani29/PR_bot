@@ -163,10 +163,7 @@ public class ReviewEngineTests
         markdown.Should().Contain("> [!CAUTION]");
         markdown.Should().Contain("### 🚨 VERDICT: CHANGES REQUIRED");
         markdown.Should().Contain("### 🩺 Code Quality & Health Scorecard");
-        markdown.Should().Contain("### 📁 Audited Files Matrix");
-        markdown.Should().Contain("`src/AuthService.cs`");
-        markdown.Should().Contain("`+20 / -5`");
-        markdown.Should().Contain("1 Critical");
+        markdown.Should().NotContain("### 📁 Audited Files Matrix");
         markdown.Should().Contain("### 🧠 AI Executive Summary (Google Gemini)");
         markdown.Should().Contain("Executive summary of changes.");
         markdown.Should().Contain("<details open>");
@@ -206,7 +203,7 @@ public class ReviewEngineTests
         markdown.Should().Contain("> [!TIP]");
         markdown.Should().Contain("### ✨ VERDICT: READY TO MERGE — PERFECT SCORE (100/100)");
         markdown.Should().Contain("PASSED ✅");
-        markdown.Should().Contain("Clean (0 issues)");
+        markdown.Should().NotContain("### 📁 Audited Files Matrix");
         markdown.Should().Contain("✨ **No code quality, reliability, or security issues detected");
     }
 }

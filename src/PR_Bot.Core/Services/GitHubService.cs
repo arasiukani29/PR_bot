@@ -344,32 +344,7 @@ public sealed class GitHubService : IGitHubService
         sb.AppendLine($"| {(lowCount > 0 ? "🟢" : "✅")} | 🟢 **Low Priority** | Code hygiene, modern idiom, optional suggestion | **{lowCount}** |");
         sb.AppendLine();
 
-        // 6. Audited Files Matrix (if changed files are present)
-        if (context.ChangedFiles.Count > 0)
-        {
-            sb.AppendLine("---");
-            sb.AppendLine();
-            sb.AppendLine("### 📁 Audited Files Matrix");
-            sb.AppendLine();
-            sb.AppendLine("| Status | File | Changes | Findings |");
-            sb.AppendLine("|:------:|:-----|:-------:|:---------|");
-
-            foreach (var file in context.ChangedFiles)
-            {
-                var fileFindings = result.Comments
-                    .Where(c => c.FilePath.Equals(file.FileName, StringComparison.OrdinalIgnoreCase) ||
-                                file.FileName.EndsWith("/" + c.FilePath, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-
-                var (fileStatus, findingsSummary) = GetFileStatusAndSummary(fileFindings);
-                var changesStr = $"`+{file.Additions} / -{file.Deletions}`";
-
-                sb.AppendLine($"| {fileStatus} | `{file.FileName}` | {changesStr} | {findingsSummary} |");
-            }
-            sb.AppendLine();
-        }
-
-        // 7. AI Executive Summary (if provided by Gemini)
+        // 6. AI Executive Summary (if provided by Gemini)
         if (!string.IsNullOrWhiteSpace(result.SummaryMarkdown))
         {
             sb.AppendLine("---");
@@ -447,33 +422,10 @@ public sealed class GitHubService : IGitHubService
         }
         sb.AppendLine();
 
-        // 10. Footer
+        // 9. Footer
         sb.AppendLine("---");
         sb.AppendLine("<sub>Reviewed automatically with [Universal PR Bot](https://github.com/marketplace) • Powered by Google Gemini AI & .NET 10</sub>");
 
         return sb.ToString();
-    }
-
-    private static (string StatusIcon, string Summary) GetFileStatusAndSummary(List<ReviewComment> comments)
-    {
-        if (comments.Count == 0)
-        {
-            return ("✅", "Clean (0 issues)");
-        }
-
-        var crit = comments.Count(c => c.Severity == AnalyzerSeverity.Critical);
-        var high = comments.Count(c => c.Severity == AnalyzerSeverity.Error);
-        var med = comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
-        var low = comments.Count(c => c.Severity == AnalyzerSeverity.Info);
-
-        var statusIcon = crit > 0 ? "🚨" : high > 0 ? "🔴" : med > 0 ? "🟡" : "🟢";
-
-        var parts = new List<string>();
-        if (crit > 0) parts.Add($"{crit} Critical");
-        if (high > 0) parts.Add($"{high} High");
-        if (med > 0) parts.Add($"{med} Medium");
-        if (low > 0) parts.Add($"{low} Low");
-
-        return (statusIcon, string.Join(", ", parts));
     }
 }
