@@ -8,6 +8,13 @@ public sealed class ReviewComment
     public required string FilePath { get; init; }
     public required int Line { get; init; }
 
+
+    /// <summary>
+    /// Optional starting line number for a multi-line comment spanning a range of lines.
+    /// When specified and less than <see cref="Line"/>, GitHub renders a multi-line range comment.
+    /// </summary>
+    public int? StartLine { get; init; }
+
     /// <summary>
     /// The line position within the git diff patch (required by GitHub for inline review comments).
     /// </summary>

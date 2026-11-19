@@ -151,12 +151,12 @@ public sealed class GitHubService : IGitHubService
             _logger.LogWarning(ex, "Could not fetch existing review comments for deduplication.");
         }
 
-        // Collect new comments that have valid diff positions and haven't already been reported
-        var inlineComments = new List<DraftPullRequestReviewComment>();
+        // Collect new comments that have valid lines and haven't already been reported
+        var inlineComments = new List<ReviewCommentSubmissionPayload>();
 
         foreach (var comment in result.Comments)
         {
-            if (comment.DiffPosition.HasValue && comment.DiffPosition.Value > 0)
+            if (comment.Line > 0)
             {
                 var body = $"{comment.Body}\n\n<sub>Reported by {comment.AnalyzerName}</sub>";
 
@@ -168,7 +168,16 @@ public sealed class GitHubService : IGitHubService
 
                 if (!isDuplicate)
                 {
-                    inlineComments.Add(new DraftPullRequestReviewComment(body, comment.FilePath, comment.DiffPosition.Value));
+                    int? multilineStart = (comment.StartLine.HasValue && comment.StartLine.Value < comment.Line) ? comment.StartLine.Value : null;
+                    inlineComments.Add(new ReviewCommentSubmissionPayload
+                    {
+                        Path = comment.FilePath,
+                        Body = body,
+                        Line = comment.Line,
+                        StartLine = multilineStart,
+                        Side = "RIGHT",
+                        StartSide = multilineStart.HasValue ? "RIGHT" : null
+                    });
                 }
                 else
                 {
@@ -178,6 +187,12 @@ public sealed class GitHubService : IGitHubService
         }
 
         var reviewEvent = DetermineReviewEvent(result, context.ReviewEventMode);
+        var reviewEventStr = reviewEvent switch
+        {
+            PullRequestReviewEvent.Approve => "APPROVE",
+            PullRequestReviewEvent.RequestChanges => "REQUEST_CHANGES",
+            _ => "COMMENT"
+        };
 
         _logger.LogInformation(
             "Submitting review to PR #{PrNumber} with event {Event} and {Count} inline comment(s)...",
@@ -185,35 +200,55 @@ public sealed class GitHubService : IGitHubService
 
         try
         {
-            var review = new PullRequestReviewCreate
+            var reviewPayload = new ReviewSubmissionPayload
             {
                 CommitId = context.HeadSha,
-                Event = reviewEvent,
+                Event = reviewEventStr,
                 Body = summaryMarkdown, // Posts the overall summary table in the review
                 Comments = inlineComments.Count > 0 ? inlineComments : null
             };
 
+            var endpoint = new Uri($"repos/{context.Owner}/{context.Repo}/pulls/{context.PullRequestNumber}/reviews", UriKind.Relative);
+
             try
             {
-                await _client.PullRequest.Review.Create(
-                    context.Owner,
-                    context.Repo,
-                    context.PullRequestNumber,
-                    review);
+                await _client.Connection.Post<PullRequestReview>(
+                    endpoint,
+                    reviewPayload,
+                    "application/vnd.github+json",
+                    "application/json",
+                    (IDictionary<string, string>?)null,
+                    cancellationToken);
 
                 _logger.LogInformation("Successfully submitted PR review with event {Event}.", reviewEvent);
+            }
+            catch (ApiException ex) when (reviewPayload.Comments != null && ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
+            {
+                _logger.LogWarning("GitHub rejected inline comments ({Message}). Retrying review with summary only...", ex.Message);
+                reviewPayload.Comments = null;
+                await _client.Connection.Post<PullRequestReview>(
+                    endpoint,
+                    reviewPayload,
+                    "application/vnd.github+json",
+                    "application/json",
+                    (IDictionary<string, string>?)null,
+                    cancellationToken);
+
+                _logger.LogInformation("Successfully submitted PR review without inline comments.");
             }
             catch (ApiException ex) when (reviewEvent != PullRequestReviewEvent.Comment &&
                                          (ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity ||
                                           ex.StatusCode == System.Net.HttpStatusCode.Forbidden))
             {
                 _logger.LogWarning("GitHub rejected {Event} review ({Message}). Retrying review as advisory Comment...", reviewEvent, ex.Message);
-                review.Event = PullRequestReviewEvent.Comment;
-                await _client.PullRequest.Review.Create(
-                    context.Owner,
-                    context.Repo,
-                    context.PullRequestNumber,
-                    review);
+                reviewPayload.Event = "COMMENT";
+                await _client.Connection.Post<PullRequestReview>(
+                    endpoint,
+                    reviewPayload,
+                    "application/vnd.github+json",
+                    "application/json",
+                    (IDictionary<string, string>?)null,
+                    cancellationToken);
 
                 _logger.LogInformation("Successfully submitted PR review as fallback Comment.");
             }
@@ -404,7 +439,10 @@ public sealed class GitHubService : IGitHubService
                 foreach (var comment in group)
                 {
                     var titleSnippet = !string.IsNullOrWhiteSpace(comment.Title) ? $" — {comment.Title}" : "";
-                    sb.AppendLine($"#### {icon} `{comment.FilePath}` (Line {comment.Line}){titleSnippet}");
+                    var lineDisplay = (comment.StartLine.HasValue && comment.StartLine.Value < comment.Line)
+                        ? $"Lines {comment.StartLine}-{comment.Line}"
+                        : $"Line {comment.Line}";
+                    sb.AppendLine($"#### {icon} `{comment.FilePath}` ({lineDisplay}){titleSnippet}");
                     sb.AppendLine();
                     sb.AppendLine(comment.Body);
                     sb.AppendLine();
@@ -487,4 +525,22 @@ public sealed class GitHubService : IGitHubService
         // Advisory issues (Medium or Low severity only) -> Comment
         return PullRequestReviewEvent.Comment;
     }
+}
+
+internal sealed class ReviewSubmissionPayload
+{
+    public required string CommitId { get; set; }
+    public required string Body { get; set; }
+    public required string Event { get; set; }
+    public List<ReviewCommentSubmissionPayload>? Comments { get; set; }
+}
+
+internal sealed class ReviewCommentSubmissionPayload
+{
+    public required string Path { get; init; }
+    public required string Body { get; init; }
+    public required int Line { get; init; }
+    public int? StartLine { get; init; }
+    public string Side { get; init; } = "RIGHT";
+    public string? StartSide { get; init; }
 }

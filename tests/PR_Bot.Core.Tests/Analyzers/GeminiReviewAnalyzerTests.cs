@@ -1017,4 +1017,119 @@ public class GeminiReviewAnalyzerTests
         comment.Body.Should().Contain("  export function Component(options: Record<string, unknown>): ClassDecorator;");
         comment.Body.Should().Contain("```suggestion");
     }
+
+    [Fact]
+    public void ParseGeminiResponse_WithStartLineAndLine_ShouldPopulateStartLine()
+    {
+        // Arrange
+        var json = """
+        {
+          "findings": [
+            {
+              "file": "src/app/login.component.html",
+              "line": 12,
+              "start_line": 8,
+              "priority": "low",
+              "title": "Add autocomplete attribute for username",
+              "category": "Input Validation",
+              "message": "Adding autocomplete='username' enables browser password managers to accurately autofill the field.",
+              "suggested_fix": "  type=\"text\"\n  id=\"username\"\n  name=\"username\"\n  [(ngModel)]=\"username\"\n  autocomplete=\"username\"\n  required"
+            }
+          ],
+          "summary": "Added input autocomplete attributes."
+        }
+        """;
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json);
+
+        // Assert
+        summary.Should().Be("Added input autocomplete attributes.");
+        comments.Should().ContainSingle();
+        var comment = comments[0];
+        comment.FilePath.Should().Be("src/app/login.component.html");
+        comment.StartLine.Should().Be(8);
+        comment.Line.Should().Be(12);
+        comment.SuggestedFix.Should().Contain("autocomplete=\"username\"");
+        comment.Body.Should().Contain("```suggestion");
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_WithInvalidStartLine_ShouldFallbackToSingleLine()
+    {
+        // Arrange: start_line is greater than or equal to line
+        var json = """
+        {
+          "findings": [
+            {
+              "file": "src/Service.cs",
+              "line": 10,
+              "start_line": 15,
+              "priority": "medium",
+              "message": "Invalid line range where start > end."
+            },
+            {
+              "file": "src/Service.cs",
+              "line": 20,
+              "start_line": 20,
+              "priority": "low",
+              "message": "Single line disguised as range."
+            }
+          ],
+          "summary": "Done"
+        }
+        """;
+
+        // Act
+        var (comments, _) = _analyzer.ParseGeminiResponse(json);
+
+        // Assert: Both should have StartLine == null
+        comments.Should().HaveCount(2);
+        comments[0].StartLine.Should().BeNull();
+        comments[0].Line.Should().Be(10);
+        comments[1].StartLine.Should().BeNull();
+        comments[1].Line.Should().Be(20);
+    }
+
+    [Fact]
+    public void BuildReviewMarkdown_WithMultilineComment_ShouldDisplayLineRangeInSummary()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 5,
+            Title = "UI improvements",
+            Author = "author",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            ChangedFiles = [new PullRequestFileChange { FileName = "login.html", Status = "modified", Additions = 5, Deletions = 0, Changes = 5 }]
+        };
+
+        var result = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment
+                {
+                    FilePath = "login.html",
+                    StartLine = 8,
+                    Line = 12,
+                    Title = "Add autocomplete attribute",
+                    Category = "Input Validation",
+                    Body = "Improve accessibility and autofill.",
+                    Severity = AnalyzerSeverity.Info,
+                    AnalyzerName = "Gemini AI"
+                }
+            ]
+        };
+
+        // Act
+        var markdown = PR_Bot.Core.Services.GitHubService.BuildReviewMarkdown(context, result);
+
+        // Assert: Markdown header displays (Lines 8-12) instead of (Line 12)
+        markdown.Should().Contain("`login.html` (Lines 8-12)");
+    }
 }

@@ -67,8 +67,10 @@ public static class CodeReviewPrompt
 
         12. NO TRIVIAL NITPICKING: Never flag indentation, whitespace, brace placement, or subjective stylistic preferences. Linters and formatters handle formatting; your focus is correctness, security, performance, input validation, and maintainability. (Note: missing string .trim() on user credentials is an authentication/validation logic defect, not formatting; and use of 'any' in TypeScript is a maintainability/type-safety defect).
 
-        13. STRICT LINE PRECISION (NEVER TARGET BRACES OR BLANK LINES):
-           - Every finding's "line" number MUST point to the EXACT line of meaningful code containing the defect.
+        13. STRICT LINE PRECISION & MULTILINE RANGES:
+           - For single-line defects: Set "line" to that exact statement line. Omit "start_line" (or set to null).
+           - For multi-line defects or suggestions: When a defect or its replacement spans a block of multiple lines (e.g. multi-line method signature, loop, try-catch, or a tag with multiple attributes like lines 8 to 12), provide BOTH "start_line" (first line of the block) and "line" (last line of the block).
+           - ANTI-DUPLICATION RULE FOR SUGGESTIONS: When providing a "suggested_fix" that replaces a block of code or adds attributes/statements into an existing multi-line structure, your "start_line" and "line" MUST span the ENTIRE existing block being replaced! If you target only a single line (e.g. line 8) with a multi-line replacement that includes lines 9-12, GitHub will duplicate lines 9-12. Always set start_line to the beginning of the block and line to the end of the block so GitHub cleanly replaces the whole range without duplicates.
            - NEVER report line numbers containing only opening or closing braces (open or close braces), blank lines, or closing parentheses.
            - If a bug is inside a method (e.g. an invalid if-statement, logic bug, or bad return value), target that exact statement line (e.g. the line with 'if' or 'return'), NOT the method's opening or closing brace.
            - If an issue is about method parameters, annotations, or missing method-level validations, target the method declaration line (e.g. 'public async Task<IActionResult> ...'), NEVER the opening '{'.
@@ -127,12 +129,13 @@ public static class CodeReviewPrompt
               "findings": [
                 {
                   "line": 42,
+                  "start_line": 38,
                   "priority": "critical|high|medium|low",
                   "title": "Short descriptive title of the issue (e.g., Logging Sensitive Information, Null Reference on User Input, Unbounded Query Without Pagination)",
                   "category": "One of: Security, Reliability, Input Validation, Performance, Maintainability",
                   "message": "Clear explanation of the concrete problem found in the code.",
                   "why_it_matters": "One or two sentences explaining the real-world business or system impact (e.g., credential theft, data loss, service crash, compliance violation).",
-                  "suggested_fix": "The exact replacement source code line(s) that should replace the current line. ONLY the raw replacement code, no markdown fences, no explanation, no diff markers. This will be placed inside a GitHub suggestion block. If no code fix applies, set to null."
+                  "suggested_fix": "The exact replacement source code line(s) that should replace the line range (from start_line to line, or the single line). ONLY the raw replacement code, no markdown fences, no explanation, no diff markers. This will be placed inside a GitHub suggestion block. If no code fix applies, set to null."
                 }
               ]
             }
@@ -141,7 +144,8 @@ public static class CodeReviewPrompt
         }
 
         IMPORTANT RULES FOR suggested_fix:
-        - The "suggested_fix" value must contain ONLY the replacement source code that should replace the line(s) at the reported line number.
+        - The "suggested_fix" value must contain ONLY the replacement source code that should replace the line(s) between "start_line" and "line" (or the single line if start_line is omitted).
+        - When replacing multiple lines, ensure "start_line" is the first line to replace and "line" is the last line to replace so the replacement replaces the complete range cleanly with no duplicates.
         - Do NOT wrap it in markdown fences (no ```). Do NOT include diff markers (+/-). Do NOT include explanatory text.
         - It should be a drop-in replacement for the exact line(s) reported — as if you are editing the file directly.
         - If the fix requires removing a line entirely, set suggested_fix to "" (empty string).
@@ -173,7 +177,7 @@ public static class CodeReviewPrompt
             1. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance, Maintainability).
             2. MULTI-FILE AUDIT: When multiple files are included in this diff payload, audit EVERY file thoroughly. Never stop after reviewing the first file.
             3. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings. Report every defect discovered.
-            4. EXACT LINE TARGETING: Provide the file, exact line number, priority, concrete explanation of impact, and an actionable markdown code fix snippet. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
+            4. EXACT LINE & MULTILINE TARGETING: Provide the file, exact line number, optional start_line (when defect or suggestion spans multiple lines), priority, concrete explanation of impact, and an actionable code fix snippet. When providing a multi-line suggestion, set start_line and line to span all replaced lines so GitHub does not duplicate code. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
             5. STRICT CATEGORY PRECEDENCE: Categorize using Security > Reliability > Input Validation > Performance > Maintainability. Passwords, secrets, or PII in logs MUST ALWAYS be "Security". Never report duplicate findings on the same line.
             6. 4-TIER PRIORITY HIERARCHY:
                - Critical: Exploitable security vulnerabilities, plaintext passwords/PII in logs (CWE-532), production-halting crashes.

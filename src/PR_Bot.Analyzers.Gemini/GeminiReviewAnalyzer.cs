@@ -165,6 +165,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 .First())
             .OrderByDescending(c => c.Severity)
             .ThenBy(c => c.FilePath)
+            .ThenBy(c => c.StartLine ?? c.Line)
             .ThenBy(c => c.Line)
             .ToList();
     }
@@ -460,6 +461,11 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
     {
         var file = finding.TryGetProperty("file", out var fp) ? fp.GetString() ?? fallbackFile : fallbackFile;
         var line = finding.TryGetProperty("line", out var lp) && lp.TryGetInt32(out var l) ? l : 1;
+        int? startLine = null;
+        if (finding.TryGetProperty("start_line", out var slp) && slp.TryGetInt32(out var sl) && sl > 0 && sl < line)
+        {
+            startLine = sl;
+        }
         var message = finding.TryGetProperty("message", out var mp) ? mp.GetString() ?? "" : "";
 
         var priorityStr = finding.TryGetProperty("priority", out var pp) ? pp.GetString() :
@@ -498,6 +504,19 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             {
                 resolvedFile = matchingFile.FileName;
                 resolvedLine = AdjustMeaningfulLine(matchingFile, line);
+                if (startLine.HasValue)
+                {
+                    var resolvedStart = AdjustMeaningfulLine(matchingFile, startLine.Value);
+                    if (resolvedStart < resolvedLine)
+                    {
+                        startLine = resolvedStart;
+                    }
+                    else
+                    {
+                        startLine = null; // invalid range after adjustment, fall back to single line
+                    }
+                }
+
                 diffPosition = FindDiffPosition(matchingFile.Patch, resolvedLine);
                 if (!diffPosition.HasValue)
                 {
@@ -505,7 +524,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 }
 
                 // Check target line content to preserve indentation and guard solitary braces
-                var targetLineContent = GetLineContent(matchingFile, resolvedLine);
+                int baseIndentLine = startLine ?? resolvedLine;
+                var targetLineContent = GetLineContent(matchingFile, baseIndentLine);
                 if (targetLineContent != null)
                 {
                     var trimmed = targetLineContent.Trim();
@@ -538,6 +558,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         {
             FilePath = resolvedFile,
             Line = resolvedLine,
+            StartLine = startLine,
             DiffPosition = diffPosition,
             Body = body,
             Severity = severity,
@@ -644,7 +665,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
         // Match individual finding objects in the findings array
         var findingRegex = new Regex(
-            @"\{\s*""file""\s*:\s*""(?<file>[^""]+)""\s*,\s*""line""\s*:\s*(?<line>\d+)\s*,\s*""(?:priority|severity)""\s*:\s*""(?<priority>[^""]+)""\s*,\s*""message""\s*:\s*""(?<message>(?:\\.|[^""\\])*)""\s*\}",
+            @"\{\s*""file""\s*:\s*""(?<file>[^""]+)""\s*,\s*""line""\s*:\s*(?<line>\d+)(?:\s*,\s*""start_line""\s*:\s*(?<start_line>\d+))?\s*,\s*""(?:priority|severity)""\s*:\s*""(?<priority>[^""]+)""\s*,\s*""message""\s*:\s*""(?<message>(?:\\.|[^""\\])*)""\s*\}",
             RegexOptions.Singleline);
 
         var matches = findingRegex.Matches(json);
@@ -652,6 +673,11 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         {
             var file = match.Groups["file"].Value;
             var line = int.Parse(match.Groups["line"].Value);
+            int? startLine = null;
+            if (match.Groups["start_line"].Success && int.TryParse(match.Groups["start_line"].Value, out var sl) && sl > 0 && sl < line)
+            {
+                startLine = sl;
+            }
             var priorityStr = match.Groups["priority"].Value;
             var message = Regex.Unescape(match.Groups["message"].Value);
 
@@ -677,6 +703,19 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 {
                     resolvedFile = matchingFile.FileName;
                     resolvedLine = AdjustMeaningfulLine(matchingFile, line);
+                    if (startLine.HasValue)
+                    {
+                        var resolvedStart = AdjustMeaningfulLine(matchingFile, startLine.Value);
+                        if (resolvedStart < resolvedLine)
+                        {
+                            startLine = resolvedStart;
+                        }
+                        else
+                        {
+                            startLine = null;
+                        }
+                    }
+
                     diffPosition = FindDiffPosition(matchingFile.Patch, resolvedLine);
                     if (!diffPosition.HasValue)
                     {
@@ -692,6 +731,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             {
                 FilePath = resolvedFile,
                 Line = resolvedLine,
+                StartLine = startLine,
                 DiffPosition = diffPosition,
                 Body = body,
                 Severity = severity,
