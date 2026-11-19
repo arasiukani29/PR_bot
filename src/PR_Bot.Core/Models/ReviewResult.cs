@@ -40,18 +40,31 @@ public sealed class ReviewResult
     };
 
     /// <summary>
-    /// Formatted visual progress meter (e.g. [██████████░░░░░░░░░░] 50%).
+    /// Formatted visual progress meter matching the quality grade colors:
+    /// Grade A (🟩), Grade B (🟨), Grade C (🟧), Grade F (🟥), remaining (⬛).
     /// </summary>
     public string HealthProgressBar
     {
         get
         {
-            const int totalBlocks = 20;
+            const int totalBlocks = 10;
             int filledBlocks = (int)Math.Round((HealthScore / 100.0) * totalBlocks);
             filledBlocks = Math.Clamp(filledBlocks, 0, totalBlocks);
             int emptyBlocks = totalBlocks - filledBlocks;
 
-            return $"[{new string('█', filledBlocks)}{new string('░', emptyBlocks)}] {HealthScore}%";
+            string fillChar = HealthScore switch
+            {
+                >= 90 => "🟩",
+                >= 75 => "🟨",
+                >= 50 => "🟧",
+                _ => "🟥"
+            };
+            const string emptyChar = "⬛";
+
+            var bar = string.Concat(Enumerable.Repeat(fillChar, filledBlocks)) +
+                      string.Concat(Enumerable.Repeat(emptyChar, emptyBlocks));
+
+            return $"{bar} &nbsp; **{HealthScore}%**";
         }
     }
 }

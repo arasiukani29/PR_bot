@@ -14,6 +14,7 @@ public sealed class PullRequestContext
     public required string BaseBranch { get; init; }
     public required string HeadBranch { get; init; }
     public required string HeadSha { get; init; }
+    public ReviewEventMode ReviewEventMode { get; init; } = ReviewEventMode.Dynamic;
     public List<PullRequestFileChange> ChangedFiles { get; set; } = [];
 }
 

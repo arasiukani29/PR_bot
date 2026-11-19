@@ -70,7 +70,8 @@ try
         Author = inputs.Author,
         BaseBranch = inputs.BaseBranch,
         HeadBranch = inputs.HeadBranch,
-        HeadSha = inputs.HeadSha
+        HeadSha = inputs.HeadSha,
+        ReviewEventMode = inputs.ReviewEventMode
     };
 
     // 4. Fetch PR files and diffs

@@ -1,6 +1,7 @@
 namespace PR_Bot.Action;
 
 using PR_Bot.Analyzers.Gemini;
+using PR_Bot.Core.Models;
 
 /// <summary>
 /// Reads and validates inputs provided by GitHub Actions environment variables.
@@ -20,6 +21,7 @@ public sealed class ActionInputs
     public string? GeminiApiKey { get; }
     public string GeminiModel { get; }
     public bool FailOnErrors { get; }
+    public ReviewEventMode ReviewEventMode { get; }
 
     public ActionInputs()
     {
@@ -55,6 +57,14 @@ public sealed class ActionInputs
 
         var failOnErrStr = Environment.GetEnvironmentVariable("FAIL_ON_ERRORS") ?? "false";
         FailOnErrors = bool.TryParse(failOnErrStr, out var fail) && fail;
+
+        var modeStr = Environment.GetEnvironmentVariable("REVIEW_EVENT_MODE") ?? "dynamic";
+        ReviewEventMode = modeStr.ToLowerInvariant() switch
+        {
+            "strict" => ReviewEventMode.Strict,
+            "comment-only" or "commentonly" or "comment" => ReviewEventMode.CommentOnly,
+            _ => ReviewEventMode.Dynamic
+        };
     }
 
     private static string GetRequired(string variableName)

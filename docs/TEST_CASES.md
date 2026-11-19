@@ -534,7 +534,7 @@ When testing any Pull Request, use this **5-second checklist**:
 
 | Check Item | Where to Look | Expected State |
 |:---|:---|:---|
-| **1. Conversation Sticky Comment** | PR Conversation tab | Shows `🤖 Universal PR Review Bot Summary` with score and grade. |
+| **1. Conversation Sticky Review & Status** | PR Conversation tab / Header | Shows `🤖 Universal PR Review Bot` dashboard with color progress bar and proper GitHub Review Event status (`requested changes` on critical/high, `approved` on clean, or `commented`). |
 | **2. Inline Comments** | Files Changed tab | Shows inline comment on the exact line with ````suggestion` code snippet. |
 | **3. Fix Push (`[Outdated]`)** | PR Conversation tab | Old comments have gray `[Outdated]` tag after pushing fix. |
 | **4. Score Update** | PR Conversation tab | Summary score updates to `100/100` after all bugs are resolved. |

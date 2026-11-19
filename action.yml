@@ -27,6 +27,10 @@ inputs:
     description: 'Fail the GitHub workflow check if critical errors are detected.'
     required: false
     default: 'false'
+  review-event-mode:
+    description: "GitHub review submission mode: 'dynamic' (default), 'strict', or 'comment-only'."
+    required: false
+    default: 'dynamic'
 
 runs:
   using: 'composite'
@@ -51,5 +55,6 @@ runs:
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
         GEMINI_MODEL: ${{ inputs.gemini-model }}
         FAIL_ON_ERRORS: ${{ inputs.fail-on-errors }}
+        REVIEW_EVENT_MODE: ${{ inputs.review-event-mode }}
       run: |
         dotnet run --configuration Release --project "${{ github.action_path }}/src/PR_Bot.Action/PR_Bot.Action.csproj"

@@ -177,27 +177,46 @@ public sealed class GitHubService : IGitHubService
             }
         }
 
+        var reviewEvent = DetermineReviewEvent(result, context.ReviewEventMode);
+
         _logger.LogInformation(
-            "Submitting review to PR #{PrNumber} with {Count} inline comment(s)...",
-            context.PullRequestNumber, inlineComments.Count);
+            "Submitting review to PR #{PrNumber} with event {Event} and {Count} inline comment(s)...",
+            context.PullRequestNumber, reviewEvent, inlineComments.Count);
 
         try
         {
             var review = new PullRequestReviewCreate
             {
                 CommitId = context.HeadSha,
-                Event = PullRequestReviewEvent.Comment,
+                Event = reviewEvent,
                 Body = summaryMarkdown, // Posts the overall summary table in the review
                 Comments = inlineComments.Count > 0 ? inlineComments : null
             };
 
-            await _client.PullRequest.Review.Create(
-                context.Owner,
-                context.Repo,
-                context.PullRequestNumber,
-                review);
+            try
+            {
+                await _client.PullRequest.Review.Create(
+                    context.Owner,
+                    context.Repo,
+                    context.PullRequestNumber,
+                    review);
 
-            _logger.LogInformation("Successfully submitted PR review.");
+                _logger.LogInformation("Successfully submitted PR review with event {Event}.", reviewEvent);
+            }
+            catch (ApiException ex) when (reviewEvent != PullRequestReviewEvent.Comment &&
+                                         (ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity ||
+                                          ex.StatusCode == System.Net.HttpStatusCode.Forbidden))
+            {
+                _logger.LogWarning("GitHub rejected {Event} review ({Message}). Retrying review as advisory Comment...", reviewEvent, ex.Message);
+                review.Event = PullRequestReviewEvent.Comment;
+                await _client.PullRequest.Review.Create(
+                    context.Owner,
+                    context.Repo,
+                    context.PullRequestNumber,
+                    review);
+
+                _logger.LogInformation("Successfully submitted PR review as fallback Comment.");
+            }
         }
         catch (Exception ex)
         {
@@ -327,7 +346,7 @@ public sealed class GitHubService : IGitHubService
         sb.AppendLine();
         sb.AppendLine("| Metric | Result / Status | Benchmark Visualizer |");
         sb.AppendLine("| :--- | :---: | :--- |");
-        sb.AppendLine($"| **Code Health Score** | **{result.HealthScore} / 100** | `{result.HealthProgressBar}` |");
+        sb.AppendLine($"| **Code Health Score** | **{result.HealthScore} / 100** | {result.HealthProgressBar} |");
         sb.AppendLine($"| **Quality Grade** | **Grade {result.HealthGrade}** | 🟢 **A** (90-100) &nbsp; 🟡 **B** (75-89) &nbsp; 🟠 **C** (50-74) &nbsp; 🔴 **F** (<50) |");
         sb.AppendLine($"| **Defects Flagged** | **{totalCount} Total Issues** | 🚨 **{criticalCount}** Critical &nbsp;•&nbsp; 🔴 **{highCount}** High &nbsp;•&nbsp; 🟡 **{mediumCount}** Medium &nbsp;•&nbsp; 🟢 **{lowCount}** Low |");
         sb.AppendLine($"| **Quality Gate** | **{(criticalCount == 0 && highCount == 0 ? "PASSED ✅" : "FAILED ❌")}** | {(criticalCount == 0 && highCount == 0 ? "Meets safety criteria for team review" : "Must resolve Critical & High issues to pass")} |");
@@ -427,5 +446,45 @@ public sealed class GitHubService : IGitHubService
         sb.AppendLine("<sub>Reviewed automatically with [Universal PR Bot](https://github.com/marketplace) • Powered by Google Gemini AI & .NET 10</sub>");
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Evaluates the review result and maps it to the appropriate GitHub Review Event
+    /// based on severity thresholds and configured mode.
+    /// </summary>
+    public static PullRequestReviewEvent DetermineReviewEvent(ReviewResult result, ReviewEventMode mode = ReviewEventMode.Dynamic)
+    {
+        if (mode == ReviewEventMode.CommentOnly)
+        {
+            return PullRequestReviewEvent.Comment;
+        }
+
+        if (mode == ReviewEventMode.Strict)
+        {
+            if (result.CriticalCount > 0 || result.HighCount > 0 || result.MediumCount > 0)
+            {
+                return PullRequestReviewEvent.RequestChanges;
+            }
+
+            return result.Comments.Count == 0
+                ? PullRequestReviewEvent.Approve
+                : PullRequestReviewEvent.Comment;
+        }
+
+        // Dynamic mode (default):
+        // Quality Gate failure (Critical or High defects) -> Request Changes
+        if (result.CriticalCount > 0 || result.HighCount > 0)
+        {
+            return PullRequestReviewEvent.RequestChanges;
+        }
+
+        // 100% clean PR with zero issues -> Approve
+        if (result.Comments.Count == 0)
+        {
+            return PullRequestReviewEvent.Approve;
+        }
+
+        // Advisory issues (Medium or Low severity only) -> Comment
+        return PullRequestReviewEvent.Comment;
     }
 }
