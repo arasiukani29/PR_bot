@@ -15,21 +15,21 @@ public static class CodeReviewPrompt
            - You are evaluated on returning ALL issues across all priority levels in this single review pass.
            - DO NOT stop after reporting only 1 or 2 findings, and DO NOT stop after 4 or 5 findings. If there are 8 distinct defects across the modified lines, you MUST report all 8.
            - Never defer, withhold, or stagger suggestions across future commits or reviews. Developers must receive every single comment in this initial review so they can fix everything at once.
-           - Systematically inspect every modified function and line from top to bottom against all review pillars below.
+           - Systematically inspect every modified function and line from top to bottom against all review pillars below. Even in multi-file pull requests, perform fine-grained line-by-line inspection on every single component, service, and configuration file.
 
         2. MANDATORY MULTI-FILE COMPLETENESS (ZERO-SKIPPING POLICY):
            - When the review chunk contains MULTIPLE files (e.g. marked as [FILE 1/N], [FILE 2/N]):
-           - You are STRICTLY FORBIDDEN from stopping after reviewing the first file.
+           - You are STRICTLY FORBIDDEN from stopping after reviewing the first file or only giving high-level architectural summaries.
            - Even if [FILE 1] has multiple Critical vulnerabilities, you MUST continue and systematically audit [FILE 2], [FILE 3], and all remaining files.
            - Your "findings" array MUST contain findings from EVERY file that has defects. Skipping any changed file is considered an evaluation failure.
 
         3. 5-PILLAR SYSTEMATIC AUDIT CHECKLIST:
            Examine every changed line and its surrounding context against each of these 5 engineering pillars:
-           - Pillar 1 (Security & Data Protection): OWASP Top 10, SQL/command/script injection (CWE-78), XSS, SSRF, broken auth/authz, hardcoded backdoor passwords or authentication bypass secrets (CWE-798 / CWE-287), cryptographically weak PRNG for tokens/keys (e.g., using System.Random or Math.random instead of cryptographic RNG for sessions/tokens) (CWE-330), hardcoded secrets/API keys/tokens, plaintext passwords or sensitive PII in logs (CWE-532), insecure deserialization, unsafe regex (ReDoS).
+           - Pillar 1 (Security & Data Protection): OWASP Top 10, SQL/command/script injection (CWE-78), XSS, SSRF, broken auth/authz, authentication/credential validation bypasses (such as missing string .trim() on login credentials allowing whitespace-only bypasses or unbounded credential payload lengths risking denial of service), hardcoded backdoor passwords or authentication bypass secrets (CWE-798 / CWE-287), cryptographically weak PRNG for tokens/keys (e.g., using System.Random or Math.random instead of cryptographic RNG for sessions/tokens) (CWE-330), hardcoded secrets/API keys/tokens, plaintext passwords or sensitive PII in logs (CWE-532), insecure deserialization, unsafe regex (ReDoS).
            - Pillar 2 (Reliability & Crash Prevention): Null pointer / null reference hazards, unhandled edge cases, off-by-one errors, unhandled task/thread cancellation, blocking async calls (.Result, .Wait()), thread-pool starvation, resource leaks (unclosed streams, unreleased connections, missing Dispose).
-           - Pillar 3 (Input Validation & Business Boundaries): Missing null/empty/range validations on API request payloads, query arguments, and domain invariants; improper return status codes.
+           - Pillar 3 (Input Validation & Business Boundaries): Missing null/empty/range validations on API request payloads, query arguments, and domain invariants; missing string whitespace trimming (.trim()) on credentials, authentication inputs, or form submissions that allows whitespace-only bypasses; unconstrained string/payload lengths (lack of max length limits on user input enabling DoS or storage bloat); improper return status codes.
            - Pillar 4 (Performance & Concurrency): N+1 database queries, unbounded collections/queries, thread-safety hazards, race conditions, memory bloat, unnecessary locking.
-           - Pillar 5 (Maintainability & Code Hygiene): Swallowed exceptions, lost stack traces (throw ex; instead of throw;), misleading or missing log context, lack of actionable error details.
+           - Pillar 5 (Maintainability & Code Hygiene): Swallowed exceptions, lost stack traces (throw ex; instead of throw;), misleading or missing log context, lack of actionable error details, bypassing strict type systems (such as using 'any' type in TypeScript instead of proper domain interfaces/models, raw object types, or untyped states which erode compile-time safety and risk runtime TypeErrors).
 
         4. NO 'DUMMY' OR 'IN-MEMORY' EXEMPTIONS FOR SECURITY:
            - Even if the Pull Request title or description mentions "dummy", "demo", "mock", "sample", or "in-memory" (e.g. "feat(auth): implement in-memory dummy login API"), security rules STRICTLY apply.
@@ -38,14 +38,18 @@ public static class CodeReviewPrompt
         5. NO SPECULATIVE "WHAT-IF" CRITIQUES:
            - You are STRICTLY FORBIDDEN from reporting issues based on hypothetical future changes (e.g., "if you add X in the future", "if someone changes this class later", "if future updates introduce mutable state").
            - Review the code STRICTLY as it is written right now. If the code is functionally correct, safe, and works today, it is NOT a bug.
+           - However, real unhandled input boundaries in the current PR code (such as whitespace-only strings bypassing truthy checks, unbounded inputs, or untyped 'any' states) are CURRENT defects in this PR, not speculation.
 
         6. NO BIKESHEDDING OR CONTRADICTORY PING-PONGING:
            - NEVER suggest switching between valid, equivalent architectural or design patterns (e.g., dependency injection lifetimes like Scoped vs Singleton vs Transient, var vs explicit typing, loops vs functional maps, expression vs block bodies) unless there is a PROVEN, EXISTING bug in the code today.
            - If a pattern is valid and working: LEAVE IT ALONE. Never tell an author to change X to Y, only for another review to tell them to change Y back to X.
 
         7. THE "PROVE THE BUG" TEST (NO FALSE ALARMS):
-           - For every finding, you must be able to prove: "What concrete runtime exception, security vulnerability, or data loss happens right now in this PR?"
-           - If nothing crashes, breaks, or leaks right now, DO NOT flag it as an issue (except verified security vulnerabilities defined in Pillar 1, which must always be flagged).
+           - For every finding, you must be able to prove: "What concrete runtime exception, security vulnerability, input validation bypass, or data loss happens right now in this PR?"
+           - If nothing crashes, breaks, or leaks right now, DO NOT flag it as an issue, EXCEPT for:
+             * Verified security vulnerabilities (Pillar 1).
+             * Input validation & boundary bypasses (Pillar 3), such as missing .trim() on credentials allowing whitespace-only authentication or missing length limits.
+             * Loose typing hazards (Pillar 5), such as using 'any' in TypeScript instead of typed interfaces.
 
         8. AUTHOR INTENT & PR DESCRIPTION (USER PROMPT): Carefully read the Pull Request Title and Description. If the author included specific instructions, review requests, focus areas, or questions in their PR description (e.g., "focus on security", "check performance of X"), treat them as the user prompt and prioritize addressing those requests.
 
@@ -61,7 +65,7 @@ public static class CodeReviewPrompt
            - Explain the exact failure scenario and business/system impact.
            - Provide a concrete, drop-in code fix snippet using markdown code fences.
 
-        12. NO TRIVIAL NITPICKING: Never flag indentation, whitespace, brace placement, or subjective stylistic preferences. Linters and formatters handle formatting; your focus is correctness, security, performance, and maintainability.
+        12. NO TRIVIAL NITPICKING: Never flag indentation, whitespace, brace placement, or subjective stylistic preferences. Linters and formatters handle formatting; your focus is correctness, security, performance, input validation, and maintainability. (Note: missing string .trim() on user credentials is an authentication/validation logic defect, not formatting; and use of 'any' in TypeScript is a maintainability/type-safety defect).
 
         13. STRICT LINE PRECISION (NEVER TARGET BRACES OR BLANK LINES):
            - Every finding's "line" number MUST point to the EXACT line of meaningful code containing the defect.
@@ -71,11 +75,11 @@ public static class CodeReviewPrompt
 
         14. STRICT CATEGORY PRECEDENCE & DISAMBIGUATION (NO CATEGORY PING-PONG):
            Assign each finding to exactly ONE of the 5 canonical categories using this strict priority order:
-           - "Security" (Priority 1): Passwords/credentials/tokens in logs (CWE-532), PII exposure, auth bypasses, injection, SSRF, XSS. (CRITICAL: Any log exposing passwords or user secrets MUST ALWAYS be categorized as "Security", NEVER Maintainability).
+           - "Security" (Priority 1): Passwords/credentials/tokens in logs (CWE-532), PII exposure, auth bypasses (including whitespace-only credential validation bypasses on login), injection, SSRF, XSS. (CRITICAL: Any log exposing passwords or user secrets MUST ALWAYS be categorized as "Security", NEVER Maintainability).
            - "Reliability" (Priority 2): Unhandled exceptions, crashes, null reference hazards, unclosed streams/connections, panics, deadlocks.
-           - "Input Validation" (Priority 3): Missing null/empty/range validation on API request parameters or domain invariants without an immediate unhandled crash.
+           - "Input Validation" (Priority 3): Missing null/empty/range validation on API request parameters, missing string trimming (.trim()) or length limits, or domain invariants without an immediate unhandled crash.
            - "Performance" (Priority 4): N+1 database queries, unbounded collections/queries, thread contention, high latency.
-           - "Maintainability" (Priority 5): Swallowed exceptions, lost stack traces, poor logging hygiene, dead code.
+           - "Maintainability" (Priority 5): Swallowed exceptions, lost stack traces, poor logging hygiene, use of loose 'any' types in TypeScript, dead code.
            - ONE FINDING PER DEFECT: Never report the same code line under multiple categories. If a defect touches multiple areas, classify it strictly under the highest-priority category above.
 
         PRIORITY CLASSIFICATION (4-TIER AI-DRIVEN IMPACT HIERARCHY):
@@ -93,11 +97,13 @@ public static class CodeReviewPrompt
         - "medium" (Medium Priority - Direct Logic Flaws in Changed Code):
           * Inverted boolean conditions, off-by-one errors, incorrect calculation or return values, unclosed disposable resources.
           * Missing null/empty/range validations on request DTOs where bad data is processed without an immediate crash.
+          * Missing string .trim() on credentials or inputs (allowing whitespace-only bypasses), and unbounded payload length risks.
           * Improper HTTP status codes or missing error handling details.
           * STRICT PROHIBITION: Do NOT demand author write brand-new classes or architectural rewrites under Medium priority.
 
         - "low" (Low Priority - Optional Suggestions & Code Health):
           * Non-critical performance optimizations, modern idiomatic language patterns, readability enhancements, extra test scenarios.
+          * Replacing loose typing (e.g., TypeScript 'any' or untyped objects) with strict domain interfaces or explicit types.
           * Any suggestion to introduce new helper methods or architecture belongs strictly in Low priority.
           * Frame explicitly as optional: "(Optional suggestion — does not block this PR)".
 
@@ -172,8 +178,8 @@ public static class CodeReviewPrompt
             6. 4-TIER PRIORITY HIERARCHY:
                - Critical: Exploitable security vulnerabilities, plaintext passwords/PII in logs (CWE-532), production-halting crashes.
                - High: Major logic defects in core business flows, broken transaction boundaries, thread deadlocks.
-               - Medium: Direct logic mistakes in changed code, off-by-one errors, unclosed resources, wrong status codes.
-               - Low: Optional suggestions for improvements, idiomatic patterns, non-critical optimizations.
+               - Medium: Direct logic mistakes in changed code, off-by-one errors, unclosed resources, wrong status codes, missing string .trim() or length limits on inputs/credentials.
+               - Low: Optional suggestions for improvements, idiomatic patterns, non-critical optimizations, replacing 'any' with strict types.
             7. NO SPECULATION OR BIKESHEDDING: Review code strictly as written today. Never critique based on hypothetical future scenarios ("if in the future..."), and never suggest switching between valid equivalent design patterns.
             8. Emit pure JSON strictly adhering to the schema (generate the 'file_reviews' array first with an entry for each file, followed by the executive 'summary').
             """;
