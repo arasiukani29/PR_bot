@@ -536,15 +536,45 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                     }
                     else if (!string.IsNullOrWhiteSpace(suggestedFix))
                     {
-                        // Preserve leading indentation of the line being replaced so GitHub diff aligns seamlessly
-                        int indentLen = targetLineContent.TakeWhile(char.IsWhiteSpace).Count();
-                        if (indentLen > 0)
+                        // Guard against no-op suggestions: if suggestedFix is identical to existing line/range, discard it!
+                        string? targetTextToCompare = null;
+                        if (startLine.HasValue)
                         {
-                            var indent = targetLineContent[..indentLen];
-                            if (!suggestedFix.StartsWith(indent) && !suggestedFix.StartsWith(" ") && !suggestedFix.StartsWith("\t"))
+                            var rangeLines = new List<string>();
+                            for (int lineIdx = startLine.Value; lineIdx <= resolvedLine; lineIdx++)
                             {
-                                var fixLines = suggestedFix.Split('\n');
-                                suggestedFix = string.Join("\n", fixLines.Select(l => string.IsNullOrWhiteSpace(l) ? l : indent + l));
+                                var lineText = GetLineContent(matchingFile, lineIdx);
+                                if (lineText != null) rangeLines.Add(lineText);
+                            }
+                            if (rangeLines.Count > 0)
+                            {
+                                targetTextToCompare = string.Join("\n", rangeLines);
+                            }
+                        }
+                        else
+                        {
+                            targetTextToCompare = targetLineContent;
+                        }
+
+                        if (targetTextToCompare != null && string.Equals(
+                            suggestedFix.Trim().Replace("\r\n", "\n"),
+                            targetTextToCompare.Trim().Replace("\r\n", "\n"),
+                            StringComparison.Ordinal))
+                        {
+                            suggestedFix = null;
+                        }
+                        else
+                        {
+                            // Preserve leading indentation of the line being replaced so GitHub diff aligns seamlessly
+                            int indentLen = targetLineContent.TakeWhile(char.IsWhiteSpace).Count();
+                            if (indentLen > 0)
+                            {
+                                var indent = targetLineContent[..indentLen];
+                                if (!suggestedFix.StartsWith(indent) && !suggestedFix.StartsWith(" ") && !suggestedFix.StartsWith("\t"))
+                                {
+                                    var fixLines = suggestedFix.Split('\n');
+                                    suggestedFix = string.Join("\n", fixLines.Select(l => string.IsNullOrWhiteSpace(l) ? l : indent + l));
+                                }
                             }
                         }
                     }

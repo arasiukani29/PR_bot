@@ -148,8 +148,9 @@ public static class CodeReviewPrompt
         - When replacing multiple lines, ensure "start_line" is the first line to replace and "line" is the last line to replace so the replacement replaces the complete range cleanly with no duplicates.
         - Do NOT wrap it in markdown fences (no ```). Do NOT include diff markers (+/-). Do NOT include explanatory text.
         - It should be a drop-in replacement for the exact line(s) reported — as if you are editing the file directly.
+        - NEVER output the exact same unmodified line as "suggested_fix". If your fix does not change the code on this line, or if the fix requires changes elsewhere, set suggested_fix to null.
         - If the fix requires removing a line entirely, set suggested_fix to "" (empty string).
-        - If no concrete single-line fix is possible (e.g., the fix requires adding a new class), set suggested_fix to null.
+        - If no concrete single-line fix is possible (e.g., the fix requires adding a new class or logic elsewhere), set suggested_fix to null.
         """;
 
     public static string BuildUserMessage(string prTitle, string author, string diffChunk)

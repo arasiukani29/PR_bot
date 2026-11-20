@@ -697,6 +697,68 @@ public class GeminiReviewAnalyzerTests
     }
 
     [Fact]
+    public void ParseGeminiResponse_WithIdenticalSuggestedFix_ShouldDiscardSuggestionBlock()
+    {
+        // Arrange: Line 28 contains exact same text as the suggestion
+        var targetCode = "const primaryRole = this.currentUser?.roles?.[0] || 'User';";
+        var patch = $"@@ -28,1 +28,1 @@\n+{targetCode}";
+        var fullContent = string.Join("\n", Enumerable.Range(1, 27).Select(i => $"// Line {i}")) + "\n  " + targetCode;
+
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 5,
+            Title = "Test identical fix",
+            Author = "author",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "src/app/login/login.component.ts",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 0,
+                    Changes = 1,
+                    Patch = patch,
+                    FullContent = fullContent
+                }
+            ]
+        };
+
+        var json = $$"""
+        {
+          "findings": [
+            {
+              "file": "src/app/login/login.component.ts",
+              "line": 28,
+              "priority": "medium",
+              "title": "Null Reference Access on Uninitialized User Object",
+              "category": "Reliability",
+              "message": "Accessing this.currentUser?.roles?.[0] when currentUser is initialized to null results in undefined role assignment.",
+              "why_it_matters": "Users logging in will always fall back to 'User' role.",
+              "suggested_fix": "{{targetCode}}"
+            }
+          ],
+          "summary": "Review summary."
+        }
+        """;
+
+        // Act
+        var (comments, _) = _analyzer.ParseGeminiResponse(json, context);
+
+        // Assert: The suggested fix is identical to original line 28, so it MUST be discarded!
+        comments.Should().ContainSingle();
+        var comment = comments[0];
+        comment.SuggestedFix.Should().BeNull();
+        comment.Body.Should().NotContain("```suggestion");
+        comment.Body.Should().Contain("Accessing this.currentUser?.roles?.[0]");
+    }
+
+    [Fact]
     public void DeduplicateComments_SameLineMultipleFindings_ShouldKeepHighestCategoryPrecedence()
     {
         // Arrange: Two findings on the exact same file and line
