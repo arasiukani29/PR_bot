@@ -1,183 +1,146 @@
-# PR Bot Comment Lifecycle & Resolution Guide
+# PR Bot Comment & Fix Guide (Simple & Easy)
 
 ---
 
-## 1. Overview
+## 1. Quick Summary (What does this bot do?)
 
-This document describes the complete lifecycle of code review comments posted by the **Universal PR Bot**, including:
-- **In-Place Comment Updates:** How previously reported defects are automatically detected as fixed and updated to `[RESOLVED ✅]` with the developer's applied code diff.
-- **All-in-One Review Block:** How the top-level Review Dashboard scorecard and inline code comments are unified into a single review, preventing timeline pollution.
-- **Deduplication & Idempotency:** How re-runs and subsequent pushes avoid posting duplicate comments or redundant review cards.
+When you open a Pull Request (PR), this bot acts like an automated code reviewer:
+1. **Finds bugs** in your code and leaves comments with suggested fixes.
+2. **Shows a single scorecard** at the top of the PR with a health grade (A, B, C, F).
+3. **Recognizes your fixes:** When you fix a bug in a new commit, the bot updates the old comment to **`[RESOLVED ✅]`** and shows the exact code you added to fix it!
+4. **No spam:** It updates existing comments instead of creating duplicate comments on every push.
 
 ---
 
-## 2. Core Architecture & Workflow Diagram
+## 2. How It Works (Simple Diagram)
 
 ```mermaid
-flowchart TD
-    A[Push / PR Trigger] --> B[Fetch Changed Files & Patches]
-    B --> C[Run Analyzers Static + Gemini AI]
-    C --> D[Reconcile Existing Bot Comments]
-    
-    D --> E{For each past bot comment}
-    E -- Defect gone in latest commit --> F[Extract Fix Diff via PatchResolutionExtractor<br/>& Edit Comment to RESOLVED]
-    E -- Defect still present --> G[Keep Comment Active - Do Not Touch]
-    E -- Already resolved --> H[Skip - Audit Trail Preserved]
-    
-    F --> I[Submit / Update All-in-One Review]
-    G --> I
-    H --> I
-    
-    I --> J{Are there new defects?}
-    J -- Yes --> K[Post new inline comments on modified lines<br/>Set Review Event: REQUEST_CHANGES]
-    J -- No and all clear --> L[Update Review Status to APPROVE]
-    J -- No new issues & state unchanged --> M[Update Review Body In-Place via PUT]
+flowchart LR
+    A[You push code] --> B[Bot reads changes]
+    B --> C[Bot checks for bugs]
+    C --> D{Did you fix old bugs?}
+    D -- Yes --> E[Marks old comment as RESOLVED with your code diff]
+    D -- No --> F[Leaves comment open]
+    E --> G{Any new bugs?}
+    F --> G
+    G -- Yes --> H[Adds new comment on new bug line]
+    G -- None left --> I[Approves PR with 100% score 🎉]
 ```
 
 ---
 
-## 3. Detailed Scenarios & Behavior Matrix
+## 3. Real-Life Scenarios (Step-by-Step)
 
-### Scenario 1: Initial PR Review (New Defects Found)
-* **Trigger:** PR is opened or initial push is made.
-* **Condition:** Analyzers identify defects at or above configured thresholds (e.g., Critical/High priority).
-* **Behavior:**
-  1. Each finding receives a hidden tracking marker: `<!-- pr-bot-finding:file={path}:line={line} -->`.
-  2. The bot creates an **All-in-One Review** (`POST /repos/{owner}/{repo}/pulls/{number}/reviews`):
-     - **Review Body:** Full Markdown Review Dashboard containing Code Health Scorecard, Grade, Verdict Alert Banner, and Defect Breakdown.
-     - **Review Event:** `REQUEST_CHANGES` (or `COMMENT` if only low/advisory findings).
-     - **Review Comments:** Inline comments attached directly to the offending lines in the *Files changed* tab.
-* **PR Timeline Result:** Exactly **one review block** appears on the PR containing both the dashboard and the inline comments.
+### Scenario 1: You open a PR with 2 bugs
+* **What happened:** You open a PR with two problems: Bug A on Line 20 and Bug B on Line 65.
+* **What the bot does:**
+  * Shows **one review box** with your scorecard (Score: 50%, Grade C, "Changes Requested").
+  * Adds **two comments** right next to Line 20 and Line 65 with suggested code fixes.
 
 ---
 
-### Scenario 2: Developer Fixes Defect (Issue Resolved)
-* **Trigger:** Developer edits the code to fix the issue and pushes a new commit (`pull_request: synchronize`).
-* **Condition:** The analyzer re-scans the file and no longer flags any defect around that line.
-* **Behavior:**
-  1. **Detection:** In `ReconcileResolvedCommentsAsync`, the bot matches the prior comment to the modified file. Because the defect is no longer reported, it is marked as resolved.
-  2. **Diff Extraction:** `PatchResolutionExtractor` inspects the unified Git diff (`file.Patch`) for the file around that line number and extracts the newly added lines (`+ ...`).
-  3. **In-Place Comment Update:** The bot calls `ReviewComment.Edit` to update the original inline comment:
-     - Changes header to: `### ✅ [RESOLVED] Issue Fixed in commit <sha>`.
-     - Inserts the exact code diff added by the developer.
-     - Collapses the original issue report into a `<details>` dropdown.
-     - Appends `<!-- pr-bot-resolved -->` to prevent redundant future edits.
-  4. **Status Update:** If all blocking defects are resolved, the bot updates the Review status to **`APPROVE`** and updates the health score to Grade A (100%).
+### Scenario 2: You fix 1 bug, but leave 1 bug unfixed (Partial Fix)
+* **What happened:** You fixed Bug A (Line 20), but forgot to fix Bug B (Line 65).
+* **What the bot does:**
+  * **Bug A comment:** Automatically changes to **`✅ [RESOLVED]`** and displays the code you added.
+  * **Bug B comment:** Stays open (no duplicates created).
+  * **Scorecard:** Health score goes up (e.g., 50% $\rightarrow$ 75%).
+  * **Verdict:** Still "Changes Requested" because Bug B is still not fixed.
 
 ---
 
-### Scenario 3: Developer Fixes Old Defect, But Introduces a New Bug
-* **Trigger:** Developer pushes a commit that resolves the original bug on Line 40, but introduces a new problem on Line 75.
-* **Condition:** Defect on Line 40 is gone, but a new defect is detected on Line 75.
-* **Behavior:**
-  1. **Old Comment (Line 40):** Edited in-place to `[RESOLVED ✅]` showing the code diff of the fix.
-  2. **New Comment (Line 75):** A fresh inline comment is posted on Line 75 with the problem description and fix suggestion.
-  3. **Review Dashboard:** The single Review Dashboard updates its scorecard:
-     - Recalculates Code Health Score based on the new defect.
-     - Quality Gate remains `FAILED ❌`.
-     - Review event remains `REQUEST_CHANGES`.
-* **Developer Experience:** Clear, immediate feedback: confirms the first fix worked, while highlighting the new bug that needs attention.
+### Scenario 3: You fix a bug, but accidentally create a new bug
+* **What happened:** You fixed Bug B, but while editing, you made a new mistake on Line 110 (Bug C).
+* **What the bot does:**
+  * **Bug B comment:** Updates to **`✅ [RESOLVED]`** with your fix.
+  * **Bug C:** Gets a **fresh new comment** on Line 110 explaining the new problem.
+  * **Scorecard:** Recalculates your score for the new bug.
+* **Why this is helpful:** You get immediate confirmation that your first fix worked, while seeing the new mistake you need to fix.
 
 ---
 
-### Scenario 4: Developer Pushes Commit That Does Not Fix the Defect
-* **Trigger:** Developer pushes documentation changes, or an attempt to fix that did not resolve the underlying issue.
-* **Condition:** Analyzer continues to report the defect at or near the original line.
-* **Behavior:**
-  1. **Comment Retained:** The existing comment is left untouched and active.
-  2. **No Duplicate Comment:** The deduplication logic checks `existingComments` against the finding snippet and marker. The bot logs:
-     `Skipping already reported comment on File (Line X)`
-     and **does not post a duplicate comment**.
+### Scenario 4: A bug you already fixed comes back (Regression)
+* **What happened:** You fixed Bug A earlier. Later, another commit accidentally brings back Bug A on Line 20.
+* **What the bot does:**
+  * The old resolved comment stays as history showing you fixed it before.
+  * Because the bug is back in the code, the bot adds a **new active comment** on Line 20 warning you that the bug returned.
+  * Score drops back down to protect the project.
 
 ---
 
-### Scenario 5: Subsequent Re-run with Zero Code Changes (Idempotency)
-* **Trigger:** GitHub Actions workflow is manually re-run, or PR is reopened without new commits.
-* **Condition:** Review state is unchanged, and `inlineComments.Count == 0`.
-* **Behavior:**
-  1. The bot detects `stateUnchanged == true` and `inlineComments.Count == 0`.
-  2. It updates the existing review body in-place via `PUT /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}`.
-  3. **Zero new review blocks** or notification spam are created.
+### Scenario 5: You add lines above a bug (Line Shift)
+* **What happened:** You added 10 lines of comments at the top of the file. This pushed Bug B from Line 65 down to Line 75. You did not fix the bug.
+* **What the bot does:**
+  * The bot realizes the code only shifted down.
+  * It keeps the original comment active and does **not** post a duplicate comment.
 
 ---
 
-### Scenario 6: Handling Comments Already Marked Resolved
-* **Trigger:** Any subsequent commit or re-run after a comment was previously resolved.
-* **Condition:** Comment body contains `<!-- pr-bot-resolved -->` or `[RESOLVED]`.
-* **Behavior:**
-  1. The reconciliation loop immediately skips the comment:
-     ```csharp
-     if (comment.Body.Contains(ResolvedMarker) || comment.Body.Contains("[RESOLVED]"))
-     {
-         continue;
-     }
-     ```
-  2. The resolution audit trail and code diff remain permanently preserved.
+### Scenario 6: You delete the whole file that had the bug
+* **What happened:** You decided you don't need `OldService.cs` anymore, so you deleted it.
+* **What the bot does:**
+  * Marks the old comment as **`✅ [RESOLVED - File Removed]`**.
+  * Clears that bug from the scorecard.
 
 ---
 
-## 4. Visual Comment Templates
-
-### Template A: Newly Posted Inline Finding
-```markdown
-🔴 **[HIGH] Missing input validation on user-controlled parameters**
-
-**Category:** Reliability & Security
-**Problem:** Parameter `id` is directly parsed without range check.
-**Suggested Fix:**
-```suggestion
-if (id <= 0) return BadRequest("Invalid ID");
-```
-
-<sub>Reported by GeminiReviewAnalyzer</sub>
-<!-- pr-bot-finding:file=Services/OrderService.cs:line=42 -->
-```
+### Scenario 7: All bugs are fixed (100% Clean PR)
+* **What happened:** You fixed every single issue.
+* **What the bot does:**
+  * Every comment is marked **`✅ [RESOLVED]`** with the code changes shown.
+  * Scorecard reaches **100/100 (Grade A - Perfect Score ✨)**.
+  * Bot changes its status to **`APPROVED` 🟢**.
+  * The green **Merge Pull Request** button is unlocked!
 
 ---
 
-### Template B: Updated Comment After Developer Resolves Issue
-```markdown
-### ✅ [RESOLVED] Issue Fixed in `e5a1b2c`
+## 4. Easy Progress Table (How a PR moves commit-by-commit)
 
-**Code changes applied to resolve:**
-```diff
-@@ -40,4 +40,5 @@ public async Task<IActionResult> GetOrder(int id)
-+    if (id <= 0)
-+        return BadRequest("Invalid ID");
-     return Ok(await _repo.GetAsync(id));
-```
-
----
-<details>
-<summary>Original Finding</summary>
-
-🔴 **[HIGH] Missing input validation on user-controlled parameters**
-...
-</details>
-
-<!-- pr-bot-resolved -->
-```
+| Commit | What You Did | Old Bug A (Line 20) | Old Bug B (Line 65) | New Bug C (Line 110) | Score | PR Status |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: |
+| **Commit 1** | Opened PR with 2 bugs | 🚨 Open | 🚨 Open | — | 50% (C) | 🔴 Changes Requested |
+| **Commit 2** | Fixed Bug A | ✅ **RESOLVED** | 🚨 Open | — | 75% (B) | 🔴 Changes Requested |
+| **Commit 3** | Fixed Bug B, added Bug C | ✅ Resolved | ✅ **RESOLVED** | 🚨 Open | 75% (B) | 🔴 Changes Requested |
+| **Commit 4** | Bug A brought back by mistake | 🚨 Re-opened | ✅ Resolved | 🚨 Open | 50% (C) | 🔴 Changes Requested |
+| **Commit 5** | Fixed Bug A and Bug C | ✅ **RESOLVED** | ✅ Resolved | ✅ **RESOLVED** | 100% (A) | 🟢 **APPROVED 🎉** |
 
 ---
 
-## 5. Summary of Key Files
+## 5. What the Comments Look Like
 
-| File | Role |
-| :--- | :--- |
-| **`src/PR_Bot.Core/Services/IPatchResolutionExtractor.cs`** | Interface for Git unified diff hunk parsing. |
-| **`src/PR_Bot.Core/Services/PatchResolutionExtractor.cs`** | Implementation that locates the matching hunk and extracts code additions (`+ ...`) around the target line. |
-| **`src/PR_Bot.Core/Services/IGitHubService.cs`** | Contract defining `ReconcileResolvedCommentsAsync` and `PostReviewAsync`. |
-| **`src/PR_Bot.Core/Services/GitHubService.cs`** | Coordinates in-place comment editing, resolution reconciliation, and the unified All-in-One Review posting. |
-| **`src/PR_Bot.Action/Program.cs`** | Orchestrates the PR Bot execution pipeline. |
-| **`tests/PR_Bot.Core.Tests/Services/PatchResolutionExtractorTests.cs`** | Unit tests for diff hunk extraction and line matching. |
-| **`tests/PR_Bot.Core.Tests/Services/GitHubServiceResolutionTests.cs`** | Unit tests verifying in-place resolution editing, skipping resolved comments, and review handling. |
+### When the bot finds a bug:
+> 🔴 **[HIGH] Missing check on user input**
+> 
+> **Problem:** Variable `id` can be negative or 0.
+> **Suggested Fix:**
+> ```suggestion
+> if (id <= 0) return BadRequest("Invalid ID");
+> ```
 
 ---
 
-## 6. GitHub Branch Protection Integration
+### When you fix the bug (Bot updates the comment):
+> ### ✅ [RESOLVED] Issue Fixed in commit `a1b2c3d`
+> 
+> **Code added to fix:**
+> ```diff
+> + if (id <= 0)
+> +     return BadRequest("Invalid ID");
+> ```
+> 
+> ---
+> <details>
+> <summary>Click to view original bug report</summary>
+> 
+> 🔴 [HIGH] Missing check on user input...
+> </details>
 
-To enforce that all bot review comments must be resolved before merging:
-1. In your GitHub repository, navigate to **Settings** $\rightarrow$ **Branches** $\rightarrow$ **Branch protection rules** (or **Rulesets**).
-2. Select your default branch (e.g. `main`).
-3. Enable **"Require conversation resolution before merging"**.
-4. With this enabled, GitHub requires all conversation threads opened by the bot to be resolved before the **Merge** button becomes active.
+---
+
+## 6. How to block merging until all comments are resolved
+
+If you want GitHub to stop anyone from merging until all bot comments are resolved:
+1. Go to your GitHub repository $\rightarrow$ **Settings** $\rightarrow$ **Branches**.
+2. Click your branch (e.g., `main`).
+3. Check the box: **"Require conversation resolution before merging"**.
+4. Now, GitHub will block the merge button until all comments are marked resolved!
