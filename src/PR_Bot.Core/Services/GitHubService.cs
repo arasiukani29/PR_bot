@@ -316,12 +316,30 @@ public sealed class GitHubService : IGitHubService
             var priorMatch = context.PriorDefects.FirstOrDefault(d => d.CommentId == comment.Id);
             bool aiSaysResolved = priorMatch?.IsResolved == true;
 
-            // Check if there is still an active defect reported on this file near this line
-            bool isStillDefective = result.Comments.Any(c =>
-                c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
-                Math.Abs(c.Line - commentLine) <= 3);
+            // Check if the lines around commentLine were modified in the patch
+            bool lineWasModified = changedFile?.Patch != null &&
+                                  changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 3);
 
-            if (aiSaysResolved || (!isStillDefective && changedFile != null))
+            // A defect is ONLY resolved if:
+            // 1. When PriorDefects tracking is active: AI MUST have confirmed the resolution (aiSaysResolved).
+            //    We NEVER assume a defect is resolved just because the AI didn't re-report it!
+            // 2. When PriorDefects tracking is not active (fallback for isolated unit tests):
+            //    The line was modified AND no defect was reported on this line.
+            bool isResolved;
+            if (context.PriorDefects.Count > 0)
+            {
+                isResolved = aiSaysResolved;
+            }
+            else
+            {
+                bool isStillDefective = result.Comments.Any(c =>
+                    c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
+                    Math.Abs(c.Line - commentLine) <= 3);
+
+                isResolved = !isStillDefective && lineWasModified;
+            }
+
+            if (isResolved)
             {
                 _logger.LogInformation(
                     "Comment #{CommentId} on {Path}:{Line} detected as RESOLVED. Updating comment in-place...",
@@ -330,14 +348,17 @@ public sealed class GitHubService : IGitHubService
                 // Extract the diff of code added/modified that resolved this issue
                 var diffSnippet = _patchExtractor.ExtractResolutionDiff(changedFile?.Patch, commentLine);
 
-                string codeSection = !string.IsNullOrWhiteSpace(diffSnippet)
+                // Avoid displaying the entire file creation patch if the file was newly added (@@ -0,0)
+                bool isBrandNewFilePatch = !string.IsNullOrWhiteSpace(changedFile?.Patch) && changedFile.Patch.Contains("-0,0");
+
+                string codeSection = !string.IsNullOrWhiteSpace(diffSnippet) && !isBrandNewFilePatch
                     ? $"""
                       **Code changes applied to resolve:**
                       ```diff
                       {diffSnippet}
                       ```
                       """
-                    : "*Code changes detected and verified on this file.*";
+                    : "*Fix verified by automated review.*";
 
                 var commitSnippet = !string.IsNullOrWhiteSpace(context.HeadSha) && context.HeadSha.Length >= 7
                     ? context.HeadSha[..7]

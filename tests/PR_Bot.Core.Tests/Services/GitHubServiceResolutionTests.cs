@@ -264,6 +264,101 @@ public class GitHubServiceResolutionTests
     }
 
     [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenOnlyOneOfMultipleDefectsResolved_OnlyUpdatesResolvedComment()
+    {
+        // Arrange: 2 previous comments exist. Developer fixed #1001, but NOT #1002.
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "1234567890abcdef",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Program.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -9,3 +9,3 @@\n- AddSingleton\n+ AddScoped"
+                },
+                new PullRequestFileChange
+                {
+                    FileName = "Models/CreateTaskDto.cs",
+                    Status = "added",
+                    Additions = 22,
+                    Deletions = 0,
+                    Changes = 22,
+                    Patch = "@@ -0,0 +1,22 @@\n+ class CreateTaskDto"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 1001,
+                    FilePath = "Program.cs",
+                    Line = 10,
+                    Title = "Singleton lifetime",
+                    OriginalBody = "Use Scoped",
+                    IsResolved = true, // AI verified as resolved
+                    ResolutionExplanation = "Changed to AddScoped"
+                },
+                new PriorReviewDefect
+                {
+                    CommentId = 1002,
+                    FilePath = "Models/CreateTaskDto.cs",
+                    Line = 9,
+                    Title = "Missing whitespace trim",
+                    OriginalBody = "Add trim",
+                    IsResolved = false // NOT resolved!
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(1001, "Program.cs", "Use Scoped\n<!-- pr-bot-finding:file=Program.cs:line=10 -->"),
+            CreateComment(1002, "Models/CreateTaskDto.cs", "Add trim\n<!-- pr-bot-finding:file=Models/CreateTaskDto.cs:line=9 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        _patchExtractorMock
+            .Setup(e => e.ExtractResolutionDiff(It.IsAny<string>(), 10))
+            .Returns("- AddSingleton\n+ AddScoped");
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Result from latest run (has 0 comments because Gemini didn't repeat 1002)
+        var result = new ReviewResult();
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, result);
+
+        // Assert:
+        // Comment 1001 MUST be edited in-place
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 1001, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Once);
+
+        // Comment 1002 MUST NOT be edited in-place (must stay open because developer did not fix it!)
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 1002, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Never);
+    }
+
+    [Fact]
     public async Task PostReviewAsync_WhenExistingSummaryCommentExists_UpdatesInPlaceInsteadOfCreatingNew()
     {
         // Arrange

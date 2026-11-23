@@ -87,12 +87,12 @@ public static class CodeReviewPrompt
            - "Maintainability" (Priority 5): Swallowed exceptions, lost stack traces, poor logging hygiene, use of loose 'any' types in TypeScript, dead code.
            - ONE FINDING PER DEFECT: Never report the same code line under multiple categories. If a defect touches multiple areas, classify it strictly under the highest-priority category above.
 
-        15. DEFECT RECONCILIATION & PERSISTENT TRACKING:
-           - When 'PREVIOUS ACTIVE DEFECTS' are provided in the review payload, inspect each one against the new git diff and surrounding file context.
-           - For each previously reported defect, determine whether the developer's new code has fixed it:
-             * "resolved": The underlying issue has been resolved. Cite the exact code line and change in "resolution_note".
-             * "still_active": The code was untouched or the defect still persists. Explain why in "resolution_note".
-           - Populate the "defect_reconciliations" array with an entry for every prior defect.
+        15. DEFECT RECONCILIATION & ZERO-FALSE-RESOLUTION POLICY:
+           - DEFAULT TO 'still_active': You are evaluated on preventing false approvals and premature resolutions. Every previous defect is STILL ACTIVE by default.
+           - PROVE THE FIX BEFORE RESOLVING: You are STRICTLY FORBIDDEN from marking a defect as "resolved" unless you see concrete code changes in the diff that explicitly corrected the reported problem.
+           - UNTOUCHED CODE = STILL ACTIVE: If the developer did not modify the code for a defect, or if the original problem still persists, you MUST mark it as "still_active" with a note explaining that no fix was applied.
+           - NEVER EXCUSE EXISTING DEFECTS: Never mark a defect as "resolved" simply because you consider the code "acceptable" or because surrounding code has other attributes. If the specific issue reported previously has not been explicitly fixed by new code, it remains "still_active".
+           - Populate the "defect_reconciliations" array for EVERY prior defect.
            - In parallel, exhaustively audit ALL changed files for ANY NEW defects under "file_reviews".
 
         PRIORITY CLASSIFICATION (4-TIER AI-DRIVEN IMPACT HIERARCHY):
@@ -216,7 +216,12 @@ public static class CodeReviewPrompt
             {diffChunk}
 
             MANDATORY REVIEW INSTRUCTIONS:
-            1. DEFECT RECONCILIATION: For each item listed under PREVIOUS ACTIVE DEFECTS (if any), check if the latest code resolved it. Populate 'defect_reconciliations' with comment_id, status ('resolved' or 'still_active'), and resolution_note citing the code changes.
+            1. STRICT DEFECT RECONCILIATION (DEFAULT = "still_active"):
+               - For every defect listed under PREVIOUS ACTIVE DEFECTS:
+               - Did the developer write new code in this commit that explicitly fixed the exact issue described?
+               - If YES: set status to "resolved" and explain the exact code fix in "resolution_note".
+               - If NO (code was untouched, fix is incomplete, or defect still exists): you MUST set status to "still_active" and note that the issue remains unfixed.
+               - ZERO FALSE RESOLUTIONS: Never mark "resolved" unless you see the concrete code fix.
             2. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance, Maintainability).
             3. MULTI-FILE AUDIT: When multiple files are included in this diff payload, audit EVERY file thoroughly. Never stop after reviewing the first file.
             4. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings. Report every defect discovered.
