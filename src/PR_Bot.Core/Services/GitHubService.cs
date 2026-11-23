@@ -403,6 +403,31 @@ public sealed class GitHubService : IGitHubService
                     _logger.LogWarning(ex, "Failed to edit review comment #{CommentId} on {Path}.", comment.Id, comment.Path);
                 }
             }
+            else
+            {
+                // Defect is STILL ACTIVE.
+                // If it was posted on an older commit, delete it from the older commit
+                // so it rolls forward cleanly into the latest review batch without leaving stale duplicates!
+                if (!string.IsNullOrWhiteSpace(comment.CommitId) &&
+                    !string.Equals(comment.CommitId, context.HeadSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        await _client.PullRequest.ReviewComment.Delete(
+                            context.Owner,
+                            context.Repo,
+                            comment.Id);
+
+                        _logger.LogInformation(
+                            "Deleted old active comment #{CommentId} on {Path}:{Line} (Commit: {OldSha}) so it rolls forward to latest commit {HeadSha}.",
+                            comment.Id, comment.Path, commentLine, comment.CommitId, context.HeadSha);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not delete old active comment #{CommentId} on {Path}.", comment.Id, comment.Path);
+                    }
+                }
+            }
         }
     }
 
@@ -426,7 +451,15 @@ public sealed class GitHubService : IGitHubService
             _logger.LogWarning(ex, "Could not fetch existing review comments for deduplication.");
         }
 
-        // Collect new comments that have valid lines and haven't already been reported
+        // Only deduplicate against ACTIVE (non-resolved) comments.
+        // If a comment was previously marked [RESOLVED], re-introducing the bug is a REGRESSION,
+        // and must be reported as a fresh defect!
+        var activeExistingComments = existingComments.Where(e =>
+            e.Body != null &&
+            !e.Body.Contains(ResolvedMarker) &&
+            !e.Body.Contains("[RESOLVED]")).ToList();
+
+        // Collect comments that have valid lines and haven't already been reported
         var inlineComments = new List<ReviewCommentSubmissionPayload>();
 
         foreach (var comment in result.Comments)
@@ -438,7 +471,7 @@ public sealed class GitHubService : IGitHubService
 
                 // Check if this exact finding has already been posted to avoid duplicate spam across runs
                 var snippet = comment.Body.Length > 80 ? comment.Body[..80] : comment.Body;
-                bool isDuplicate = existingComments.Any(e =>
+                bool isDuplicate = activeExistingComments.Any(e =>
                     e.Path.Equals(comment.FilePath, StringComparison.OrdinalIgnoreCase) &&
                     (e.Body.Contains(marker) || e.Body.Contains(comment.Body) || e.Body.Contains(snippet)));
 
@@ -457,7 +490,39 @@ public sealed class GitHubService : IGitHubService
                 }
                 else
                 {
-                    _logger.LogInformation("Skipping already reported comment on {File} (Line {Line})", comment.FilePath, comment.Line);
+                    _logger.LogInformation("Skipping already reported active comment on {File} (Line {Line})", comment.FilePath, comment.Line);
+                }
+            }
+        }
+
+        // Roll forward any still-active prior defects that were not re-reported in result.Comments
+        foreach (var activeDefect in result.ActivePriorDefects)
+        {
+            if (activeDefect.Line > 0)
+            {
+                var marker = $"{FindingMarkerPrefix}file={activeDefect.FilePath}:line={activeDefect.Line} -->";
+
+                bool alreadyInComments = inlineComments.Any(c =>
+                    c.Path.Equals(activeDefect.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                    c.Line == activeDefect.Line);
+
+                if (!alreadyInComments)
+                {
+                    inlineComments.Add(new ReviewCommentSubmissionPayload
+                    {
+                        Path = activeDefect.FilePath,
+                        Body = activeDefect.OriginalBody.Contains(marker)
+                            ? activeDefect.OriginalBody
+                            : $"{activeDefect.OriginalBody}\n\n<sub>Reported by Gemini AI</sub>\n{marker}",
+                        Line = activeDefect.Line,
+                        StartLine = null,
+                        Side = "RIGHT",
+                        StartSide = null
+                    });
+
+                    _logger.LogInformation(
+                        "Rolled forward active defect #{CommentId} on {Path}:{Line} to latest review.",
+                        activeDefect.CommentId, activeDefect.FilePath, activeDefect.Line);
                 }
             }
         }
@@ -879,7 +944,7 @@ public sealed class GitHubService : IGitHubService
     }
 }
 
-internal sealed class ReviewSubmissionPayload
+public sealed class ReviewSubmissionPayload
 {
     public required string CommitId { get; set; }
     public required string Body { get; set; }
@@ -887,7 +952,7 @@ internal sealed class ReviewSubmissionPayload
     public List<ReviewCommentSubmissionPayload>? Comments { get; set; }
 }
 
-internal sealed class ReviewCommentSubmissionPayload
+public sealed class ReviewCommentSubmissionPayload
 {
     public required string Path { get; init; }
     public required string Body { get; init; }

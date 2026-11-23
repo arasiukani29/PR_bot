@@ -352,10 +352,20 @@ public class GitHubServiceResolutionTests
             r => r.Edit("test-owner", "test-repo", 1001, It.IsAny<PullRequestReviewCommentEdit>()),
             Times.Once);
 
-        // Comment 1002 MUST NOT be edited in-place (must stay open because developer did not fix it!)
+        // Comment 1001 MUST NEVER be deleted!
+        _reviewCommentsMock.Verify(
+            r => r.Delete("test-owner", "test-repo", 1001),
+            Times.Never);
+
+        // Comment 1002 MUST NOT be edited as resolved
         _reviewCommentsMock.Verify(
             r => r.Edit("test-owner", "test-repo", 1002, It.IsAny<PullRequestReviewCommentEdit>()),
             Times.Never);
+
+        // Comment 1002 (older commit) MUST be deleted so it rolls forward to latest commit
+        _reviewCommentsMock.Verify(
+            r => r.Delete("test-owner", "test-repo", 1002),
+            Times.Once);
     }
 
     [Fact]
@@ -415,5 +425,183 @@ public class GitHubServiceResolutionTests
         _issueCommentsMock.Verify(
             i => i.Create(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>()),
             Times.Never);
+    }
+
+    [Fact]
+    public async Task PostReviewAsync_WhenPreviouslyResolvedDefectReintroduced_ReportsAsNewRegression()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "new_commit_sha",
+            ChangedFiles = []
+        };
+
+        // Existing comments on PR: A previously resolved comment on Program.cs line 10
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(
+                888,
+                "Program.cs",
+                "### ✅ [RESOLVED] Issue Fixed in `old_sha`\n<!-- pr-bot-finding:file=Program.cs:line=10 -->\n<!-- pr-bot-resolved -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReview>());
+
+        ReviewSubmissionPayload? capturedPayload = null;
+        var connectionMock = new Mock<IConnection>();
+        connectionMock
+            .Setup(c => c.Post<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<ReviewSubmissionPayload>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>(
+                (_, payload, _, _, _, _) => capturedPayload = payload as ReviewSubmissionPayload)
+            .ReturnsAsync(new Mock<IApiResponse<PullRequestReview>>().Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Developer re-introduced the exact same bug on line 10!
+        var result = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment
+                {
+                    FilePath = "Program.cs",
+                    Line = 10,
+                    Title = "Singleton lifetime bug (reintroduced)",
+                    Body = "Singleton service holds state.",
+                    Severity = AnalyzerSeverity.Error,
+                    AnalyzerName = "Gemini AI"
+                }
+            ]
+        };
+
+        // Act
+        await service.PostReviewAsync(context, result);
+
+        // Assert:
+        // Must NOT skip as duplicate! Must be submitted as a new regression comment!
+        capturedPayload.Should().NotBeNull();
+        capturedPayload!.Comments.Should().NotBeNull();
+        capturedPayload.Comments.Should().ContainSingle(c => c.Path == "Program.cs" && c.Line == 10);
+    }
+
+    [Fact]
+    public async Task PostReviewAsync_RollsForwardActivePriorDefectsToLatestReview()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "commit_2_sha",
+            ChangedFiles = [],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 777,
+                    FilePath = "Controllers/TasksController.cs",
+                    Line = 34,
+                    Title = "Missing null check",
+                    OriginalBody = "DTO can be null",
+                    Severity = AnalyzerSeverity.Warning,
+                    IsResolved = false // Active!
+                }
+            ]
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReviewComment>());
+
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReview>());
+
+        ReviewSubmissionPayload? capturedPayload = null;
+        var connectionMock = new Mock<IConnection>();
+        connectionMock
+            .Setup(c => c.Post<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<ReviewSubmissionPayload>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>(
+                (_, payload, _, _, _, _) => capturedPayload = payload as ReviewSubmissionPayload)
+            .ReturnsAsync(new Mock<IApiResponse<PullRequestReview>>().Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Result from Gemini in this run has a new bug on OrderService.cs, but didn't re-report TasksController
+        var result = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment
+                {
+                    FilePath = "Services/OrderService.cs",
+                    Line = 55,
+                    Title = "Unhandled exception",
+                    Body = "Try catch missing.",
+                    Severity = AnalyzerSeverity.Error,
+                    AnalyzerName = "Gemini AI"
+                }
+            ],
+            ActivePriorDefects =
+            [
+                context.PriorDefects[0]
+            ]
+        };
+
+        // Act
+        await service.PostReviewAsync(context, result);
+
+        // Assert:
+        // Review submission MUST contain BOTH comments:
+        // 1) The active prior defect rolled forward (TasksController.cs:34)
+        // 2) The new defect (OrderService.cs:55)
+        capturedPayload.Should().NotBeNull();
+        capturedPayload!.Comments.Should().NotBeNull();
+        capturedPayload.Comments.Should().HaveCount(2);
+        capturedPayload.Comments.Should().Contain(c => c.Path == "Controllers/TasksController.cs" && c.Line == 34);
+        capturedPayload.Comments.Should().Contain(c => c.Path == "Services/OrderService.cs" && c.Line == 55);
     }
 }

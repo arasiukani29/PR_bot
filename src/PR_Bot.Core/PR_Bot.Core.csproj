@@ -13,4 +13,7 @@
     <PackageReference Include="Octokit" Version="14.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="PR_Bot.Core.Tests" />
+  </ItemGroup>
 </Project>
