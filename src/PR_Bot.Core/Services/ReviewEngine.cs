@@ -73,6 +73,12 @@ public sealed class ReviewEngine : IReviewEngine
         {
             reviewResult.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
             reviewResult.ActivePriorDefects.AddRange(context.PriorDefects.Where(d => !d.IsResolved));
+
+            // Ensure any findings that were confirmed resolved are not retained in Comments
+            reviewResult.Comments.RemoveAll(c =>
+                reviewResult.ResolvedDefects.Any(r =>
+                    r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                    Math.Abs(r.Line - c.Line) <= 3));
         }
 
         return reviewResult;

@@ -604,4 +604,192 @@ public class GitHubServiceResolutionTests
         capturedPayload.Comments.Should().Contain(c => c.Path == "Controllers/TasksController.cs" && c.Line == 34);
         capturedPayload.Comments.Should().Contain(c => c.Path == "Services/OrderService.cs" && c.Line == 55);
     }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenCommentIsActive_DeletesCommentEvenIfCommitIdMatchesHeadSha()
+    {
+        // Real-world GitHub scenario: GitHub updates comment.CommitId to the PR HeadSha.
+        // The old active comment MUST be deleted from the old review thread so it rolls forward cleanly.
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "head_sha_123",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/PaymentService.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 0,
+                    Changes = 1,
+                    Patch = "@@ -20,2 +20,3 @@"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 999,
+                    FilePath = "Services/PaymentService.cs",
+                    Line = 22,
+                    Title = "Unchecked currency",
+                    OriginalBody = "Unchecked currency",
+                    IsResolved = false // Still active!
+                }
+            ]
+        };
+
+        // GitHub API returns comment with commitId matching HeadSha
+        var comment = new PullRequestReviewComment(
+            url: "https://api.github.com",
+            id: 999,
+            nodeId: "MDEy",
+            diffHunk: "@@ -20,2 +20,3 @@",
+            path: "Services/PaymentService.cs",
+            position: 1,
+            originalPosition: 1,
+            commitId: "head_sha_123", // MATCHES HeadSha!
+            originalCommitId: "old_sha",
+            user: new User(),
+            body: "Unchecked currency\n<!-- pr-bot-finding:file=Services/PaymentService.cs:line=22 -->",
+            createdAt: DateTimeOffset.UtcNow,
+            updatedAt: DateTimeOffset.UtcNow,
+            htmlUrl: "https://github.com",
+            pullRequestUrl: "https://github.com/pr/42",
+            reactions: null!,
+            inReplyToId: null,
+            pullRequestReviewId: 1,
+            authorAssociation: AuthorAssociation.None);
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([comment]);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        var deletedIds = await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert: Comment MUST be deleted from GitHub and returned in deleted set
+        _reviewCommentsMock.Verify(
+            r => r.Delete("test-owner", "test-repo", 999),
+            Times.Once);
+
+        deletedIds.Should().Contain(999);
+    }
+
+    [Fact]
+    public async Task PostReviewAsync_WhenDefectIsResolved_RemovesAnyDuplicateFindingFromCommentsSoItIsNotCountedAsActiveBug()
+    {
+        // Arrange: PR has a defect that was resolved in this run
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "head_sha_456",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Models/CreateTaskDto.cs",
+                    Status = "modified",
+                    Additions = 2,
+                    Deletions = 1,
+                    Changes = 3,
+                    Patch = "@@ -9,2 +9,4 @@\n- old\n+ [Required]\n+ [StringLength(120)]\n+ public string Title"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 888,
+                    FilePath = "Models/CreateTaskDto.cs",
+                    Line = 9,
+                    Title = "Missing length validation",
+                    OriginalBody = "Add StringLength attribute",
+                    IsResolved = true, // AI verified as resolved!
+                    ResolutionExplanation = "Added StringLength(120)"
+                }
+            ]
+        };
+
+        var comment = CreateComment(888, "Models/CreateTaskDto.cs", "Add StringLength attribute\n<!-- pr-bot-finding:file=Models/CreateTaskDto.cs:line=9 -->");
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([comment]);
+
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReview>());
+
+        ReviewSubmissionPayload? capturedPayload = null;
+        var connectionMock = new Mock<IConnection>();
+        connectionMock
+            .Setup(c => c.Post<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<ReviewSubmissionPayload>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>(
+                (_, payload, _, _, _, _) => capturedPayload = payload as ReviewSubmissionPayload)
+            .ReturnsAsync(new Mock<IApiResponse<PullRequestReview>>().Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Result from analyzer contains a residual finding on the same file & line (e.g. Low suggestion)
+        var result = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment
+                {
+                    FilePath = "Models/CreateTaskDto.cs",
+                    Line = 9,
+                    Title = "Optional doc comment",
+                    Body = "Add XML doc.",
+                    Severity = AnalyzerSeverity.Info,
+                    AnalyzerName = "Gemini AI"
+                }
+            ]
+        };
+
+        // Act
+        await service.PostReviewAsync(context, result);
+
+        // Assert:
+        // 1. Result.Comments must have purged the resolved line finding!
+        result.Comments.Should().BeEmpty();
+        result.TotalDefects.Should().Be(0);
+        result.HealthScore.Should().Be(100);
+
+        // 2. Review body markdown must show PASSED quality gate with 0 total issues!
+        capturedPayload.Should().NotBeNull();
+        capturedPayload!.Body.Should().Contain("0 Total Issues");
+        capturedPayload.Body.Should().Contain("READY TO MERGE — PERFECT SCORE (100/100)");
+        capturedPayload.Body.Should().Contain("Resolved Issues (1)");
+    }
 }

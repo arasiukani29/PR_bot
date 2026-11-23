@@ -24,9 +24,11 @@ public interface IGitHubService
 
     /// <summary>
     /// Identifies previously reported bot comments that have been resolved by developer changes,
-    /// and updates the comments in-place with resolution status and the code diff.
+    /// updates resolved comments in-place with resolution status and the code diff,
+    /// and deletes active comments from prior runs so they roll forward to the latest review.
+    /// Returns the set of comment IDs that were deleted.
     /// </summary>
-    Task ReconcileResolvedCommentsAsync(
+    Task<ISet<long>> ReconcileResolvedCommentsAsync(
         PullRequestContext context,
         ReviewResult result,
         CancellationToken cancellationToken = default);

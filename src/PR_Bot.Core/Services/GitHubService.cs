@@ -225,13 +225,21 @@ public sealed class GitHubService : IGitHubService
         CancellationToken cancellationToken = default)
     {
         // 1. Reconcile any previously reported comments that have been resolved
-        await ReconcileResolvedCommentsAsync(context, result, cancellationToken);
+        var deletedCommentIds = await ReconcileResolvedCommentsAsync(context, result, cancellationToken);
 
         // Synchronize review result with reconciled defect states
         result.ResolvedDefects.Clear();
         result.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
         result.ActivePriorDefects.Clear();
         result.ActivePriorDefects.AddRange(context.PriorDefects.Where(d => !d.IsResolved));
+
+        // Critical: A resolved defect MUST NEVER be counted as an active defect in result.Comments!
+        // If an issue on this file & line was verified as resolved, remove any duplicate/ghost finding
+        // from result.Comments so it does not inflate the defect count or health scorecard!
+        result.Comments.RemoveAll(c =>
+            result.ResolvedDefects.Any(r =>
+                r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(r.Line - c.Line) <= 3));
 
         // 2. Build the full summary markdown dashboard
         var summaryMarkdown = BuildReviewMarkdown(context, result);
@@ -241,14 +249,15 @@ public sealed class GitHubService : IGitHubService
 
         // 4. Submit new inline comments and/or update the unified review container (APPROVE/REQUEST_CHANGES)
         // Packaging the complete dashboard in the review body ensures ONE unified review container!
-        await PostReviewBatchAsync(context, result, summaryMarkdown, cancellationToken);
+        await PostReviewBatchAsync(context, result, summaryMarkdown, deletedCommentIds, cancellationToken);
     }
 
-    public async Task ReconcileResolvedCommentsAsync(
+    public async Task<ISet<long>> ReconcileResolvedCommentsAsync(
         PullRequestContext context,
         ReviewResult result,
         CancellationToken cancellationToken = default)
     {
+        var deletedCommentIds = new HashSet<long>();
         _logger.LogInformation("Reconciling previously posted bot comments for PR #{PrNumber}...", context.PullRequestNumber);
 
         IReadOnlyList<PullRequestReviewComment> existingComments;
@@ -262,12 +271,12 @@ public sealed class GitHubService : IGitHubService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not fetch review comments for resolution reconciliation.");
-            return;
+            return deletedCommentIds;
         }
 
         if (existingComments.Count == 0)
         {
-            return;
+            return deletedCommentIds;
         }
 
         // Identify comments posted by the bot
@@ -290,12 +299,6 @@ public sealed class GitHubService : IGitHubService
             // Find if this comment's file was modified in this PR
             var changedFile = context.ChangedFiles.FirstOrDefault(f =>
                 f.FileName.Equals(comment.Path, StringComparison.OrdinalIgnoreCase));
-
-            if (changedFile == null)
-            {
-                // File wasn't modified in this PR context
-                continue;
-            }
 
             int commentLine = 0;
             var markerMatch = FindingMarkerRegex.Match(comment.Body);
@@ -336,7 +339,7 @@ public sealed class GitHubService : IGitHubService
                     c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
                     Math.Abs(c.Line - commentLine) <= 3);
 
-                isResolved = !isStillDefective && lineWasModified;
+                isResolved = !isStillDefective && lineWasModified && changedFile != null;
             }
 
             if (isResolved)
@@ -405,36 +408,37 @@ public sealed class GitHubService : IGitHubService
             }
             else
             {
-                // Defect is STILL ACTIVE.
-                // If it was posted on an older commit, delete it from the older commit
-                // so it rolls forward cleanly into the latest review batch without leaving stale duplicates!
-                if (!string.IsNullOrWhiteSpace(comment.CommitId) &&
-                    !string.Equals(comment.CommitId, context.HeadSha, StringComparison.OrdinalIgnoreCase))
+                // Defect is STILL ACTIVE from an earlier review run.
+                // Delete it from GitHub so it rolls forward cleanly into the latest review batch
+                // attached to the latest review container without leaving obsolete duplicates!
+                try
                 {
-                    try
-                    {
-                        await _client.PullRequest.ReviewComment.Delete(
-                            context.Owner,
-                            context.Repo,
-                            comment.Id);
+                    await _client.PullRequest.ReviewComment.Delete(
+                        context.Owner,
+                        context.Repo,
+                        comment.Id);
 
-                        _logger.LogInformation(
-                            "Deleted old active comment #{CommentId} on {Path}:{Line} (Commit: {OldSha}) so it rolls forward to latest commit {HeadSha}.",
-                            comment.Id, comment.Path, commentLine, comment.CommitId, context.HeadSha);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogDebug(ex, "Could not delete old active comment #{CommentId} on {Path}.", comment.Id, comment.Path);
-                    }
+                    deletedCommentIds.Add(comment.Id);
+
+                    _logger.LogInformation(
+                        "Deleted old active comment #{CommentId} on {Path}:{Line} so it rolls forward to latest review batch.",
+                        comment.Id, comment.Path, commentLine);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Could not delete old active comment #{CommentId} on {Path}.", comment.Id, comment.Path);
                 }
             }
         }
+
+        return deletedCommentIds;
     }
 
     private async Task PostReviewBatchAsync(
         PullRequestContext context,
         ReviewResult result,
         string summaryMarkdown,
+        ISet<long> deletedCommentIds,
         CancellationToken cancellationToken)
     {
         // Fetch existing review comments on the PR to prevent duplicate comments across commits
@@ -451,10 +455,11 @@ public sealed class GitHubService : IGitHubService
             _logger.LogWarning(ex, "Could not fetch existing review comments for deduplication.");
         }
 
-        // Only deduplicate against ACTIVE (non-resolved) comments.
+        // Only deduplicate against ACTIVE (non-resolved) comments that were NOT deleted in this run.
         // If a comment was previously marked [RESOLVED], re-introducing the bug is a REGRESSION,
         // and must be reported as a fresh defect!
         var activeExistingComments = existingComments.Where(e =>
+            !deletedCommentIds.Contains(e.Id) &&
             e.Body != null &&
             !e.Body.Contains(ResolvedMarker) &&
             !e.Body.Contains("[RESOLVED]")).ToList();

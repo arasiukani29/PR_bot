@@ -193,14 +193,26 @@ public static class CodeReviewPrompt
             : prDescription.Trim();
 
         var defectsSection = new StringBuilder();
-        if (priorDefects != null && priorDefects.Count > 0)
+        var activePrior = priorDefects?.Where(d => !d.IsResolved).ToList();
+        if (activePrior != null && activePrior.Count > 0)
         {
             defectsSection.AppendLine("PREVIOUS ACTIVE DEFECTS FLAGGED IN PRIOR REVIEWS (MANDATORY RECONCILIATION):");
             defectsSection.AppendLine("Systematically inspect the new diff and code context to verify if each prior defect below is now RESOLVED or STILL ACTIVE:");
-            foreach (var defect in priorDefects)
+            foreach (var defect in activePrior)
             {
                 defectsSection.AppendLine($"- [Comment #{defect.CommentId}] File: {defect.FilePath} | Reported Line: {defect.Line} | Severity: {defect.Severity} | Title: {defect.Title}");
                 defectsSection.AppendLine($"  Original Issue: {defect.OriginalBody.Replace("\r", "").Replace("\n", " ").Trim()}");
+            }
+            defectsSection.AppendLine();
+        }
+
+        var resolvedPrior = priorDefects?.Where(d => d.IsResolved).ToList();
+        if (resolvedPrior != null && resolvedPrior.Count > 0)
+        {
+            defectsSection.AppendLine("ALREADY RESOLVED DEFECTS FROM PRIOR COMMITS (DO NOT RE-REPORT UNLESS REGRESSED):");
+            foreach (var defect in resolvedPrior)
+            {
+                defectsSection.AppendLine($"- [RESOLVED] File: {defect.FilePath} | Line: {defect.Line} | Title: {defect.Title}");
             }
             defectsSection.AppendLine();
         }
