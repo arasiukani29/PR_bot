@@ -140,8 +140,13 @@ public sealed class GitHubService : IGitHubService
         // 2. Build the full summary markdown dashboard
         var summaryMarkdown = BuildReviewMarkdown(context, result);
 
-        // 3. Submit All-in-One Review (combines dashboard table + inline comments into ONE review block)
-        await PostReviewBatchAsync(context, result, summaryMarkdown, cancellationToken);
+        // 3. Upsert the sticky overall summary dashboard comment in-place.
+        // This edits the existing comment if one exists, or creates it once.
+        // This prevents duplicate summary blocks in the PR conversation timeline!
+        await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
+
+        // 4. Submit new inline comments and/or update the review status event (APPROVE/REQUEST_CHANGES)
+        await PostReviewBatchAsync(context, result, cancellationToken);
     }
 
     public async Task ReconcileResolvedCommentsAsync(
@@ -275,7 +280,6 @@ public sealed class GitHubService : IGitHubService
     private async Task PostReviewBatchAsync(
         PullRequestContext context,
         ReviewResult result,
-        string summaryMarkdown,
         CancellationToken cancellationToken)
     {
         // Fetch existing review comments on the PR to prevent duplicate comments across commits
@@ -336,8 +340,8 @@ public sealed class GitHubService : IGitHubService
             _ => "COMMENT"
         };
 
-        // Check previous reviews submitted by the bot
-        PullRequestReview? latestBotReview = null;
+        // Check previous reviews submitted by the bot to avoid redundant reviews if state is unchanged and no new comments
+        bool shouldSubmitReview = inlineComments.Count > 0;
         try
         {
             var existingReviews = await _client.PullRequest.Review.GetAll(
@@ -345,51 +349,45 @@ public sealed class GitHubService : IGitHubService
                 context.Repo,
                 context.PullRequestNumber);
 
-            latestBotReview = existingReviews
+            var latestBotReview = existingReviews
                 .Where(r => r.User != null && (r.User.Login?.Contains("bot", StringComparison.OrdinalIgnoreCase) == true || r.User.Login == "github-actions[bot]"))
                 .OrderByDescending(r => r.SubmittedAt)
                 .FirstOrDefault();
+
+            if (latestBotReview == null)
+            {
+                shouldSubmitReview = true;
+            }
+            else
+            {
+                var latestStateStr = latestBotReview.State.StringValue;
+                if (!string.Equals(latestStateStr, reviewEventStr, StringComparison.OrdinalIgnoreCase))
+                {
+                    shouldSubmitReview = true;
+                }
+            }
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Could not check prior review state.");
+            shouldSubmitReview = true;
         }
 
-        // If a previous review exists, check whether state changed or if there are new inline comments
-        if (latestBotReview != null && inlineComments.Count == 0)
+        if (!shouldSubmitReview)
         {
-            var expectedState = reviewEvent switch
-            {
-                PullRequestReviewEvent.Approve => PullRequestReviewState.Approved,
-                PullRequestReviewEvent.RequestChanges => PullRequestReviewState.ChangesRequested,
-                _ => PullRequestReviewState.Commented
-            };
-            bool stateUnchanged = latestBotReview.State.Value == expectedState;
-
-            if (stateUnchanged)
-            {
-                // Both review state and findings are unchanged (or issues were just resolved via comment edit).
-                // Update the existing review's body in-place so no new review block is created!
-                try
-                {
-                    _logger.LogInformation("Updating existing review #{ReviewId} summary body in-place...", latestBotReview.Id);
-                    var updateEndpoint = new Uri($"repos/{context.Owner}/{context.Repo}/pulls/{context.PullRequestNumber}/reviews/{latestBotReview.Id}", UriKind.Relative);
-                    await _client.Connection.Put<PullRequestReview>(
-                        updateEndpoint,
-                        new ReviewBodyUpdatePayload { Body = summaryMarkdown });
-
-                    _logger.LogInformation("Successfully updated existing review #{ReviewId} body in-place.", latestBotReview.Id);
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to update review body in-place. Will submit review as normal.");
-                }
-            }
+            _logger.LogInformation("Review status unchanged ({Event}) and no new inline comments. Skipping duplicate review event submission.", reviewEventStr);
+            return;
         }
+
+        string reviewSummaryNote = reviewEvent switch
+        {
+            PullRequestReviewEvent.Approve => "✅ **Automated Review: APPROVED** — All automated checks passed with zero defects. Full scorecard updated in the review dashboard above.",
+            PullRequestReviewEvent.RequestChanges => $"🚨 **Automated Review: CHANGES REQUESTED** — {result.CriticalCount + result.HighCount} high-priority defect(s) detected. Full scorecard updated in the review dashboard above.",
+            _ => "🟡 **Automated Review: COMMENT** — Advisory suggestions available. Full scorecard updated in the review dashboard above."
+        };
 
         _logger.LogInformation(
-            "Submitting All-in-One review to PR #{PrNumber} with event {Event} and {Count} inline comment(s)...",
+            "Submitting review to PR #{PrNumber} with event {Event} and {Count} inline comment(s)...",
             context.PullRequestNumber, reviewEvent, inlineComments.Count);
 
         try
@@ -398,7 +396,7 @@ public sealed class GitHubService : IGitHubService
             {
                 CommitId = context.HeadSha,
                 Event = reviewEventStr,
-                Body = summaryMarkdown,
+                Body = reviewSummaryNote,
                 Comments = inlineComments.Count > 0 ? inlineComments : null
             };
 
@@ -449,8 +447,7 @@ public sealed class GitHubService : IGitHubService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to submit review batch. Falling back to summary comment.");
-            await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
+            _logger.LogWarning(ex, "Failed to submit review batch.");
         }
     }
 
@@ -727,11 +724,6 @@ internal sealed class ReviewSubmissionPayload
     public required string Body { get; set; }
     public required string Event { get; set; }
     public List<ReviewCommentSubmissionPayload>? Comments { get; set; }
-}
-
-internal sealed class ReviewBodyUpdatePayload
-{
-    public required string Body { get; set; }
 }
 
 internal sealed class ReviewCommentSubmissionPayload
