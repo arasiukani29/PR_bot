@@ -9,6 +9,7 @@ public sealed class ReviewResult
     public string? SummaryMarkdown { get; set; }
     public bool HasErrors => Comments.Any(c => c.Severity >= AnalyzerSeverity.Error);
     public bool HasWarnings => Comments.Any(c => c.Severity == AnalyzerSeverity.Warning);
+    public bool HasDefectsAtOrAbove(AnalyzerSeverity minSeverity) => Comments.Any(c => c.Severity >= minSeverity);
 
     public int CriticalCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Critical);
     public int HighCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Error);

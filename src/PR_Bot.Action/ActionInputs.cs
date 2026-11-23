@@ -21,6 +21,7 @@ public sealed class ActionInputs
     public string? GeminiApiKey { get; }
     public string GeminiModel { get; }
     public bool FailOnErrors { get; }
+    public AnalyzerSeverity FailLevel { get; }
     public ReviewEventMode ReviewEventMode { get; }
 
     public ActionInputs()
@@ -55,15 +56,24 @@ public sealed class ActionInputs
         var envModel = Environment.GetEnvironmentVariable("GEMINI_MODEL");
         GeminiModel = !string.IsNullOrWhiteSpace(envModel) ? envModel : GeminiOptions.DefaultModel;
 
-        var failOnErrStr = Environment.GetEnvironmentVariable("FAIL_ON_ERRORS") ?? "false";
-        FailOnErrors = bool.TryParse(failOnErrStr, out var fail) && fail;
+        var failOnErrStr = Environment.GetEnvironmentVariable("FAIL_ON_ERRORS") ?? "true";
+        FailOnErrors = !bool.TryParse(failOnErrStr, out var fail) || fail;
 
-        var modeStr = Environment.GetEnvironmentVariable("REVIEW_EVENT_MODE") ?? "dynamic";
+        var failLevelStr = Environment.GetEnvironmentVariable("FAIL_LEVEL") ?? "medium";
+        FailLevel = failLevelStr.ToLowerInvariant() switch
+        {
+            "critical" => AnalyzerSeverity.Critical,
+            "high" or "error" => AnalyzerSeverity.Error,
+            "low" or "info" => AnalyzerSeverity.Info,
+            _ => AnalyzerSeverity.Warning // default "medium" or "warning"
+        };
+
+        var modeStr = Environment.GetEnvironmentVariable("REVIEW_EVENT_MODE") ?? "strict";
         ReviewEventMode = modeStr.ToLowerInvariant() switch
         {
-            "strict" => ReviewEventMode.Strict,
+            "dynamic" => ReviewEventMode.Dynamic,
             "comment-only" or "commentonly" or "comment" => ReviewEventMode.CommentOnly,
-            _ => ReviewEventMode.Dynamic
+            _ => ReviewEventMode.Strict
         };
     }
 

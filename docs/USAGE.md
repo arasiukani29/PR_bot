@@ -41,7 +41,9 @@ The following inputs are supported by `action.yml`:
 | `github-token` | **Yes** | `${{ github.token }}` | GitHub token used to fetch PR diffs and post comments. |
 | `gemini-api-key` | No | `""` | Google Gemini API key from AI Studio. If omitted, only rule-based checks run. |
 | `gemini-model` | No | `gemini-3.5-flash` | The Gemini model name to use (e.g., `gemini-3.5-flash`, `gemini-2.5-pro`, `gemini-2.5-flash`). |
-| `fail-on-errors` | No | `false` | If set to `true`, the GitHub workflow check fails if critical errors (e.g. hardcoded secrets) are detected. |
+| `fail-on-errors` | No | `true` | If set to `true`, the GitHub workflow check fails if defects are detected at or above `fail-level`. |
+| `fail-level` | No | `medium` | Minimum severity level to fail the GitHub check: `critical`, `high`, or `medium`. |
+| `review-event-mode` | No | `strict` | GitHub review submission mode: `strict` (blocks on Critical/High/Medium), `dynamic` (blocks on Critical/High), or `comment-only`. |
 | `dotnet-version` | No | `10.0.x` | The .NET SDK version to install on the Actions runner. |
 
 ### Example with Custom Inputs:
@@ -54,6 +56,8 @@ The following inputs are supported by `action.yml`:
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
           gemini-model: 'gemini-2.5-pro'
           fail-on-errors: 'true'
+          fail-level: 'medium'
+          review-event-mode: 'strict'
 ```
 
 ---

@@ -19,6 +19,7 @@ try
     Console.WriteLine($"PR Number:  #{inputs.PullRequestNumber} ({inputs.Title})");
     Console.WriteLine($"Author:     @{inputs.Author}");
     Console.WriteLine($"Branches:   {inputs.BaseBranch} <- {inputs.HeadBranch}");
+    Console.WriteLine($"Policy:     FailOnErrors={inputs.FailOnErrors} (min severity: {inputs.FailLevel}), ReviewMode={inputs.ReviewEventMode}");
 
     // 2. Build Dependency Injection Container
     var services = new ServiceCollection();
@@ -114,9 +115,21 @@ try
     Console.WriteLine($"Findings: {reviewResult.Comments.Count} total ({reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Error)} high, {reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Warning)} medium, {reviewResult.Comments.Count(c => c.Severity == AnalyzerSeverity.Info)} low)");
     Console.WriteLine("==================================================");
 
-    if (inputs.FailOnErrors && reviewResult.HasErrors)
+    if (inputs.FailOnErrors && reviewResult.HasDefectsAtOrAbove(inputs.FailLevel))
     {
-        Console.Error.WriteLine("❌ Failing the GitHub check because critical errors were detected.");
+        var failingDefects = reviewResult.Comments.Where(c => c.Severity >= inputs.FailLevel).ToList();
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.Error.WriteLine($"\n❌ Failing the GitHub check: {failingDefects.Count} defect(s) detected at or above '{inputs.FailLevel}' severity.");
+        foreach (var defect in failingDefects.Take(5))
+        {
+            var titleDisplay = !string.IsNullOrWhiteSpace(defect.Title) ? $" — {defect.Title}" : "";
+            Console.Error.WriteLine($"  - [{defect.Severity}] {defect.FilePath} (Line {defect.Line}){titleDisplay}");
+        }
+        if (failingDefects.Count > 5)
+        {
+            Console.Error.WriteLine($"  ... and {failingDefects.Count - 5} more defect(s).");
+        }
+        Console.ResetColor();
         return 1;
     }
 

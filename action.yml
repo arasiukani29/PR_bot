@@ -24,13 +24,17 @@ inputs:
     required: false
     default: '10.0.x'
   fail-on-errors:
-    description: 'Fail the GitHub workflow check if critical errors are detected.'
+    description: 'Fail the GitHub workflow check if defects are detected at or above the configured fail-level.'
     required: false
-    default: 'false'
+    default: 'true'
+  fail-level:
+    description: "Minimum severity level to fail the GitHub check: 'critical', 'high', or 'medium' (default)."
+    required: false
+    default: 'medium'
   review-event-mode:
-    description: "GitHub review submission mode: 'dynamic' (default), 'strict', or 'comment-only'."
+    description: "GitHub review submission mode: 'strict' (default, blocks Critical/High/Medium), 'dynamic' (blocks Critical/High), or 'comment-only'."
     required: false
-    default: 'dynamic'
+    default: 'strict'
 
 runs:
   using: 'composite'
@@ -55,6 +59,7 @@ runs:
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
         GEMINI_MODEL: ${{ inputs.gemini-model }}
         FAIL_ON_ERRORS: ${{ inputs.fail-on-errors }}
+        FAIL_LEVEL: ${{ inputs.fail-level }}
         REVIEW_EVENT_MODE: ${{ inputs.review-event-mode }}
       run: |
         dotnet run --configuration Release --project "${{ github.action_path }}/src/PR_Bot.Action/PR_Bot.Action.csproj"

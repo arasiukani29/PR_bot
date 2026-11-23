@@ -328,4 +328,28 @@ public class ReviewEngineTests
         GitHubService.DetermineReviewEvent(cleanResult, ReviewEventMode.CommentOnly)
             .Should().Be(PullRequestReviewEvent.Comment);
     }
+
+    [Fact]
+    public void HasDefectsAtOrAbove_ShouldFilterBySeverityThreshold()
+    {
+        var result = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment { FilePath = "f.cs", Line = 1, Body = "warn", Severity = AnalyzerSeverity.Warning, AnalyzerName = "t" },
+                new ReviewComment { FilePath = "f.cs", Line = 2, Body = "info", Severity = AnalyzerSeverity.Info, AnalyzerName = "t" }
+            ]
+        };
+
+        // Warning is Medium (value 1)
+        result.HasDefectsAtOrAbove(AnalyzerSeverity.Warning).Should().BeTrue();
+        result.HasDefectsAtOrAbove(AnalyzerSeverity.Error).Should().BeFalse();
+        result.HasDefectsAtOrAbove(AnalyzerSeverity.Critical).Should().BeFalse();
+
+        // Add a Critical comment
+        result.Comments.Add(new ReviewComment { FilePath = "f.cs", Line = 3, Body = "crit", Severity = AnalyzerSeverity.Critical, AnalyzerName = "t" });
+        result.HasDefectsAtOrAbove(AnalyzerSeverity.Critical).Should().BeTrue();
+        result.HasDefectsAtOrAbove(AnalyzerSeverity.Error).Should().BeTrue();
+        result.HasDefectsAtOrAbove(AnalyzerSeverity.Warning).Should().BeTrue();
+    }
 }
