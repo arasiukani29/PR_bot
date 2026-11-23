@@ -343,8 +343,8 @@ public class GitHubServiceResolutionTests
         // Result from latest run (has 0 comments because Gemini didn't repeat 1002)
         var result = new ReviewResult();
 
-        // Act
-        await service.ReconcileResolvedCommentsAsync(context, result);
+        // Act (hasNewDefects = true means a new review is being constructed, so active comments roll forward)
+        await service.ReconcileResolvedCommentsAsync(context, result, hasNewDefects: true);
 
         // Assert:
         // Comment 1001 MUST be edited in-place
@@ -366,6 +366,106 @@ public class GitHubServiceResolutionTests
         _reviewCommentsMock.Verify(
             r => r.Delete("test-owner", "test-repo", 1002),
             Times.Once);
+    }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenNoNewDefectsFound_PreservesActiveCommentUntouched()
+    {
+        // Arrange: 2 previous comments exist. Developer fixed #1001, but NOT #1002.
+        // NO new defects exist in this commit (hasNewDefects = false).
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "1234567890abcdef",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Program.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -9,3 +9,3 @@\n- AddSingleton\n+ AddScoped"
+                },
+                new PullRequestFileChange
+                {
+                    FileName = "Models/CreateTaskDto.cs",
+                    Status = "added",
+                    Additions = 22,
+                    Deletions = 0,
+                    Changes = 22,
+                    Patch = "@@ -0,0 +1,22 @@\n+ class CreateTaskDto"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 1001,
+                    FilePath = "Program.cs",
+                    Line = 10,
+                    Title = "Singleton lifetime",
+                    OriginalBody = "Use Scoped",
+                    IsResolved = true, // AI verified as resolved
+                    ResolutionExplanation = "Changed to AddScoped"
+                },
+                new PriorReviewDefect
+                {
+                    CommentId = 1002,
+                    FilePath = "Models/CreateTaskDto.cs",
+                    Line = 9,
+                    Title = "Missing whitespace trim",
+                    OriginalBody = "Add trim",
+                    IsResolved = false // NOT resolved!
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(1001, "Program.cs", "Use Scoped\n<!-- pr-bot-finding:file=Program.cs:line=10 -->"),
+            CreateComment(1002, "Models/CreateTaskDto.cs", "Add trim\n<!-- pr-bot-finding:file=Models/CreateTaskDto.cs:line=9 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        _patchExtractorMock
+            .Setup(e => e.ExtractResolutionDiff(It.IsAny<string>(), 10))
+            .Returns("- AddSingleton\n+ AddScoped");
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act: hasNewDefects = false (no new defects found anywhere)
+        var deletedIds = await service.ReconcileResolvedCommentsAsync(context, new ReviewResult(), hasNewDefects: false);
+
+        // Assert:
+        // 1. Comment 1001 MUST be edited in-place to [RESOLVED]
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 1001, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Once);
+
+        // 2. Comment 1002 MUST NOT be edited as resolved
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 1002, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Never);
+
+        // 3. Comment 1002 MUST NOT be deleted (kept as-is since no new comments are being created!)
+        _reviewCommentsMock.Verify(
+            r => r.Delete("test-owner", "test-repo", 1002),
+            Times.Never);
+
+        deletedIds.Should().BeEmpty();
     }
 
     [Fact]
@@ -677,7 +777,7 @@ public class GitHubServiceResolutionTests
             patchExtractor: _patchExtractorMock.Object);
 
         // Act
-        var deletedIds = await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+        var deletedIds = await service.ReconcileResolvedCommentsAsync(context, new ReviewResult(), hasNewDefects: true);
 
         // Assert: Comment MUST be deleted from GitHub and returned in deleted set
         _reviewCommentsMock.Verify(
@@ -791,5 +891,165 @@ public class GitHubServiceResolutionTests
         capturedPayload!.Body.Should().Contain("0 Total Issues");
         capturedPayload.Body.Should().Contain("READY TO MERGE — PERFECT SCORE (100/100)");
         capturedPayload.Body.Should().Contain("Resolved Issues (1)");
+    }
+
+    [Fact]
+    public async Task PostReviewAsync_WhenDeveloperResolvesOneOfTwoBugsAndNoNewBugs_EditsOnlyResolvedCommentAndAddsNoNewComments()
+    {
+        // Scenario requested by user:
+        // PR has 2 bugs. Developer resolves 1 bug instead of 2.
+        // NO new bugs are found.
+        // Expected:
+        // - Edit ONLY the resolved comment in-place.
+        // - Do NOT delete or re-create the active comment.
+        // - Do NOT post any new inline comments.
+        // - Update the review dashboard in-place with exact bug count (1 Total Issue).
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "commit_2",
+            ReviewEventMode = ReviewEventMode.Strict,
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/AuthService.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -10,2 +10,2 @@\n- old\n+ fixed"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 1001,
+                    FilePath = "Services/AuthService.cs",
+                    Line = 10,
+                    Title = "SQL injection",
+                    OriginalBody = "Fix query",
+                    Severity = AnalyzerSeverity.Error,
+                    IsResolved = true, // Resolved in commit_2!
+                    ResolutionExplanation = "Parametrized query"
+                },
+                new PriorReviewDefect
+                {
+                    CommentId = 1002,
+                    FilePath = "Controllers/TasksController.cs",
+                    Line = 25,
+                    Title = "Missing null check",
+                    OriginalBody = "Add null check",
+                    Severity = AnalyzerSeverity.Warning,
+                    IsResolved = false // Still active!
+                }
+            ]
+        };
+
+        var comment1 = CreateComment(1001, "Services/AuthService.cs", "Fix query\n<!-- pr-bot-finding:file=Services/AuthService.cs:line=10 -->");
+        var comment2 = CreateComment(1002, "Controllers/TasksController.cs", "Add null check\n<!-- pr-bot-finding:file=Controllers/TasksController.cs:line=25 -->");
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([comment1, comment2]);
+
+        // Prior review exists in CHANGES_REQUESTED state
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+
+        var existingBotReview = new PullRequestReview(
+            id: 555,
+            nodeId: "MDEy",
+            commitId: "commit_1",
+            user: new User(),
+            body: "prior review",
+            htmlUrl: "https://github.com",
+            pullRequestUrl: "https://github.com/pr/42",
+            state: PullRequestReviewState.ChangesRequested,
+            authorAssociation: AuthorAssociation.None,
+            submittedAt: DateTimeOffset.UtcNow.AddHours(-1));
+
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([existingBotReview]);
+
+        var connectionMock = new Mock<IConnection>();
+        object? updatedReviewBodyPayload = null;
+
+        var putResponseMock = new Mock<IApiResponse<PullRequestReview>>();
+        putResponseMock.SetupGet(r => r.Body).Returns(existingBotReview);
+
+        connectionMock
+            .Setup(c => c.Put<PullRequestReview>(
+                It.Is<Uri>(u => u.ToString().Contains("/reviews/555")),
+                It.IsAny<object>()))
+            .Callback<Uri, object>((_, payload) => updatedReviewBodyPayload = payload)
+            .ReturnsAsync(putResponseMock.Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Result from latest run: NO NEW DEFECTS FOUND (result.Comments is empty)
+        var result = new ReviewResult();
+
+        // Act
+        await service.PostReviewAsync(context, result);
+
+        // Assert:
+        // 1. Comment 1001 MUST be edited in-place to [RESOLVED]
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 1001, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Once);
+
+        // 2. Comment 1002 MUST NOT be edited as resolved
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 1002, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Never);
+
+        // 3. Comment 1002 MUST NOT be deleted (preserved as-is)
+        _reviewCommentsMock.Verify(
+            r => r.Delete("test-owner", "test-repo", 1002),
+            Times.Never);
+
+        // 4. No new review with inline comments was posted!
+        connectionMock.Verify(
+            c => c.Post<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<ReviewSubmissionPayload>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never);
+
+        // 5. Existing review was updated in-place via PUT
+        connectionMock.Verify(
+            c => c.Put<PullRequestReview>(
+                It.Is<Uri>(u => u.ToString().Contains("/reviews/555")),
+                It.IsAny<object>()),
+            Times.Once);
+
+        // 6. Bug count is proper: exactly 1 Medium defect remaining!
+        result.TotalDefects.Should().Be(1);
+        result.MediumCount.Should().Be(1);
+        result.ResolvedDefects.Should().HaveCount(1);
+        result.ActivePriorDefects.Should().HaveCount(1);
+
+        updatedReviewBodyPayload.Should().NotBeNull();
+        var bodyProp = updatedReviewBodyPayload!.GetType().GetProperty("body")?.GetValue(updatedReviewBodyPayload) as string;
+        bodyProp.Should().NotBeNull();
+        bodyProp.Should().Contain("1 Total Issues");
+        bodyProp.Should().Contain("**1** Medium");
+        bodyProp.Should().Contain("Resolved Issues (1)");
     }
 }

@@ -72,13 +72,20 @@ public sealed class ReviewEngine : IReviewEngine
         if (context.PriorDefects.Count > 0)
         {
             reviewResult.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
-            reviewResult.ActivePriorDefects.AddRange(context.PriorDefects.Where(d => !d.IsResolved));
 
             // Ensure any findings that were confirmed resolved are not retained in Comments
             reviewResult.Comments.RemoveAll(c =>
                 reviewResult.ResolvedDefects.Any(r =>
                     r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
                     Math.Abs(r.Line - c.Line) <= 3));
+
+            // Deduplicate ActivePriorDefects against Comments so defects are never double counted
+            reviewResult.ActivePriorDefects.AddRange(
+                context.PriorDefects.Where(d =>
+                    !d.IsResolved &&
+                    !reviewResult.Comments.Any(c =>
+                        c.FilePath.Equals(d.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                        Math.Abs(c.Line - d.Line) <= 3)));
         }
 
         return reviewResult;

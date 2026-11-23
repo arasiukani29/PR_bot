@@ -224,14 +224,28 @@ public sealed class GitHubService : IGitHubService
         ReviewResult result,
         CancellationToken cancellationToken = default)
     {
+        // 0. Ensure any findings in result.Comments matching already-resolved prior defects are removed
+        result.Comments.RemoveAll(c =>
+            context.PriorDefects.Any(r =>
+                r.IsResolved &&
+                r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(r.Line - c.Line) <= 3));
+
+        // Determine if brand-new defects exist that were not previously reported as active comments
+        bool hasNewDefects = result.Comments.Any(c =>
+            !context.PriorDefects.Any(p =>
+                !p.IsResolved &&
+                p.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(p.Line - c.Line) <= 3));
+
         // 1. Reconcile any previously reported comments that have been resolved
-        var deletedCommentIds = await ReconcileResolvedCommentsAsync(context, result, cancellationToken);
+        // If hasNewDefects is true: deletes active comments so they roll forward to the new review batch.
+        // If hasNewDefects is false: preserves existing active comments and ONLY edits resolved comments!
+        var deletedCommentIds = await ReconcileResolvedCommentsAsync(context, result, hasNewDefects, cancellationToken);
 
         // Synchronize review result with reconciled defect states
         result.ResolvedDefects.Clear();
         result.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
-        result.ActivePriorDefects.Clear();
-        result.ActivePriorDefects.AddRange(context.PriorDefects.Where(d => !d.IsResolved));
 
         // Critical: A resolved defect MUST NEVER be counted as an active defect in result.Comments!
         // If an issue on this file & line was verified as resolved, remove any duplicate/ghost finding
@@ -241,6 +255,15 @@ public sealed class GitHubService : IGitHubService
                 r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
                 Math.Abs(r.Line - c.Line) <= 3));
 
+        // Deduplicate ActivePriorDefects against Comments so defects are never double counted
+        result.ActivePriorDefects.Clear();
+        result.ActivePriorDefects.AddRange(
+            context.PriorDefects.Where(d =>
+                !d.IsResolved &&
+                !result.Comments.Any(c =>
+                    c.FilePath.Equals(d.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                    Math.Abs(c.Line - d.Line) <= 3)));
+
         // 2. Build the full summary markdown dashboard
         var summaryMarkdown = BuildReviewMarkdown(context, result);
 
@@ -249,12 +272,13 @@ public sealed class GitHubService : IGitHubService
 
         // 4. Submit new inline comments and/or update the unified review container (APPROVE/REQUEST_CHANGES)
         // Packaging the complete dashboard in the review body ensures ONE unified review container!
-        await PostReviewBatchAsync(context, result, summaryMarkdown, deletedCommentIds, cancellationToken);
+        await PostReviewBatchAsync(context, result, summaryMarkdown, deletedCommentIds, hasNewDefects, cancellationToken);
     }
 
     public async Task<ISet<long>> ReconcileResolvedCommentsAsync(
         PullRequestContext context,
         ReviewResult result,
+        bool hasNewDefects = false,
         CancellationToken cancellationToken = default)
     {
         var deletedCommentIds = new HashSet<long>();
@@ -409,24 +433,34 @@ public sealed class GitHubService : IGitHubService
             else
             {
                 // Defect is STILL ACTIVE from an earlier review run.
-                // Delete it from GitHub so it rolls forward cleanly into the latest review batch
-                // attached to the latest review container without leaving obsolete duplicates!
-                try
+                // If brand-new defects exist elsewhere, we delete this comment so it rolls forward
+                // cleanly into the new review batch attached to the new review container.
+                // If NO new defects exist, we PRESERVE this existing comment untouched on GitHub (edit only resolved comments!).
+                if (hasNewDefects)
                 {
-                    await _client.PullRequest.ReviewComment.Delete(
-                        context.Owner,
-                        context.Repo,
-                        comment.Id);
+                    try
+                    {
+                        await _client.PullRequest.ReviewComment.Delete(
+                            context.Owner,
+                            context.Repo,
+                            comment.Id);
 
-                    deletedCommentIds.Add(comment.Id);
+                        deletedCommentIds.Add(comment.Id);
 
-                    _logger.LogInformation(
-                        "Deleted old active comment #{CommentId} on {Path}:{Line} so it rolls forward to latest review batch.",
-                        comment.Id, comment.Path, commentLine);
+                        _logger.LogInformation(
+                            "Deleted old active comment #{CommentId} on {Path}:{Line} so it rolls forward to latest review batch with new defects.",
+                            comment.Id, comment.Path, commentLine);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not delete old active comment #{CommentId} on {Path}.", comment.Id, comment.Path);
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    _logger.LogDebug(ex, "Could not delete old active comment #{CommentId} on {Path}.", comment.Id, comment.Path);
+                    _logger.LogInformation(
+                        "Preserving existing active comment #{CommentId} on {Path}:{Line} (no new defects found; updating dashboard only).",
+                        comment.Id, comment.Path, commentLine);
                 }
             }
         }
@@ -439,6 +473,7 @@ public sealed class GitHubService : IGitHubService
         ReviewResult result,
         string summaryMarkdown,
         ISet<long> deletedCommentIds,
+        bool hasNewDefects,
         CancellationToken cancellationToken)
     {
         // Fetch existing review comments on the PR to prevent duplicate comments across commits
@@ -500,34 +535,38 @@ public sealed class GitHubService : IGitHubService
             }
         }
 
-        // Roll forward any still-active prior defects that were not re-reported in result.Comments
-        foreach (var activeDefect in result.ActivePriorDefects)
+        // Only roll forward active prior defects if new defects exist.
+        // When no new defects exist, existing active comments were preserved on GitHub, so no new inline comments are needed!
+        if (hasNewDefects)
         {
-            if (activeDefect.Line > 0)
+            foreach (var activeDefect in result.ActivePriorDefects)
             {
-                var marker = $"{FindingMarkerPrefix}file={activeDefect.FilePath}:line={activeDefect.Line} -->";
-
-                bool alreadyInComments = inlineComments.Any(c =>
-                    c.Path.Equals(activeDefect.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                    c.Line == activeDefect.Line);
-
-                if (!alreadyInComments)
+                if (activeDefect.Line > 0)
                 {
-                    inlineComments.Add(new ReviewCommentSubmissionPayload
-                    {
-                        Path = activeDefect.FilePath,
-                        Body = activeDefect.OriginalBody.Contains(marker)
-                            ? activeDefect.OriginalBody
-                            : $"{activeDefect.OriginalBody}\n\n<sub>Reported by Gemini AI</sub>\n{marker}",
-                        Line = activeDefect.Line,
-                        StartLine = null,
-                        Side = "RIGHT",
-                        StartSide = null
-                    });
+                    var marker = $"{FindingMarkerPrefix}file={activeDefect.FilePath}:line={activeDefect.Line} -->";
 
-                    _logger.LogInformation(
-                        "Rolled forward active defect #{CommentId} on {Path}:{Line} to latest review.",
-                        activeDefect.CommentId, activeDefect.FilePath, activeDefect.Line);
+                    bool alreadyInComments = inlineComments.Any(c =>
+                        c.Path.Equals(activeDefect.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                        c.Line == activeDefect.Line);
+
+                    if (!alreadyInComments)
+                    {
+                        inlineComments.Add(new ReviewCommentSubmissionPayload
+                        {
+                            Path = activeDefect.FilePath,
+                            Body = activeDefect.OriginalBody.Contains(marker)
+                                ? activeDefect.OriginalBody
+                                : $"{activeDefect.OriginalBody}\n\n<sub>Reported by Gemini AI</sub>\n{marker}",
+                            Line = activeDefect.Line,
+                            StartLine = null,
+                            Side = "RIGHT",
+                            StartSide = null
+                        });
+
+                        _logger.LogInformation(
+                            "Rolled forward active defect #{CommentId} on {Path}:{Line} to latest review.",
+                            activeDefect.CommentId, activeDefect.FilePath, activeDefect.Line);
+                    }
                 }
             }
         }
@@ -550,7 +589,7 @@ public sealed class GitHubService : IGitHubService
                 context.PullRequestNumber);
 
             latestBotReview = existingReviews
-                .Where(r => r.User != null && (r.User.Login?.Contains("bot", StringComparison.OrdinalIgnoreCase) == true || r.User.Login == "github-actions[bot]"))
+                .Where(r => r.User != null && (string.IsNullOrWhiteSpace(r.User.Login) || r.User.Login.Contains("bot", StringComparison.OrdinalIgnoreCase) || r.User.Login == "github-actions[bot]"))
                 .OrderByDescending(r => r.SubmittedAt)
                 .FirstOrDefault();
         }
