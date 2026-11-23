@@ -21,4 +21,13 @@ public interface IGitHubService
         PullRequestContext context,
         ReviewResult result,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Identifies previously reported bot comments that have been resolved by developer changes,
+    /// and updates the comments in-place with resolution status and the code diff.
+    /// </summary>
+    Task ReconcileResolvedCommentsAsync(
+        PullRequestContext context,
+        ReviewResult result,
+        CancellationToken cancellationToken = default);
 }

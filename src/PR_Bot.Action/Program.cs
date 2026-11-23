@@ -104,8 +104,8 @@ try
         return 1;
     }
 
-    // 6. Post review back to GitHub
-    Console.WriteLine("\n[3/3] Posting review to GitHub pull request...");
+    // 6. Reconcile resolved comments and post/update review dashboard
+    Console.WriteLine("\n[3/3] Reconciling resolved comments & updating PR review dashboard on GitHub...");
     await gitHubService.PostReviewAsync(context, reviewResult);
 
     Console.WriteLine("\n==================================================");

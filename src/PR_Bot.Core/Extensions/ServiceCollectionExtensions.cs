@@ -22,6 +22,7 @@ public static class ServiceCollectionExtensions
             services.Configure(configure);
         }
 
+        services.AddSingleton<IPatchResolutionExtractor, PatchResolutionExtractor>();
         services.AddSingleton<IGitHubService, GitHubService>();
         services.AddSingleton<IReviewEngine, ReviewEngine>();
 

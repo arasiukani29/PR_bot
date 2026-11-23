@@ -13,18 +13,27 @@ using PR_Bot.Core.Models;
 public sealed class GitHubService : IGitHubService
 {
     public const string BotCommentMarker = "<!-- universal-pr-bot-review -->";
+    public const string FindingMarkerPrefix = "<!-- pr-bot-finding:";
+    public const string ResolvedMarker = "<!-- pr-bot-resolved -->";
+
+    private static readonly System.Text.RegularExpressions.Regex FindingMarkerRegex = new(
+        @"<!--\s*pr-bot-finding:file=(?<file>[^:]+):line=(?<line>\d+)\s*-->",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private readonly IGitHubClient _client;
     private readonly PrBotOptions _options;
+    private readonly IPatchResolutionExtractor _patchExtractor;
     private readonly ILogger<GitHubService> _logger;
 
     public GitHubService(
         IGitHubClient client,
         IOptions<PrBotOptions>? options = null,
+        IPatchResolutionExtractor? patchExtractor = null,
         ILogger<GitHubService>? logger = null)
     {
         _client = client;
         _options = options?.Value ?? new PrBotOptions();
+        _patchExtractor = patchExtractor ?? new PatchResolutionExtractor();
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<GitHubService>.Instance;
     }
 
@@ -125,16 +134,152 @@ public sealed class GitHubService : IGitHubService
         ReviewResult result,
         CancellationToken cancellationToken = default)
     {
+        // 1. Reconcile any previously reported comments that have been resolved
+        await ReconcileResolvedCommentsAsync(context, result, cancellationToken);
+
+        // 2. Build the full summary markdown dashboard
         var summaryMarkdown = BuildReviewMarkdown(context, result);
 
-        // Submit the complete review (overall summary + inline comments) in a single GitHub Review
-        await PostReviewBatchAsync(context, result, summaryMarkdown, cancellationToken);
+        // 3. Upsert the sticky overall summary dashboard comment in-place.
+        // This edits the existing comment if one exists, or creates it once.
+        // This prevents duplicate summary blocks in the PR conversation timeline!
+        await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
+
+        // 4. Submit new inline comments and/or update the review status event (APPROVE/REQUEST_CHANGES)
+        await PostReviewBatchAsync(context, result, cancellationToken);
+    }
+
+    public async Task ReconcileResolvedCommentsAsync(
+        PullRequestContext context,
+        ReviewResult result,
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Reconciling previously posted bot comments for PR #{PrNumber}...", context.PullRequestNumber);
+
+        IReadOnlyList<PullRequestReviewComment> existingComments;
+        try
+        {
+            existingComments = await _client.PullRequest.ReviewComment.GetAll(
+                context.Owner,
+                context.Repo,
+                context.PullRequestNumber);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not fetch review comments for resolution reconciliation.");
+            return;
+        }
+
+        if (existingComments.Count == 0)
+        {
+            return;
+        }
+
+        // Identify comments posted by the bot
+        var botComments = existingComments.Where(c =>
+            c.Body != null &&
+            (c.Body.Contains(FindingMarkerPrefix) ||
+             c.Body.Contains(ResolvedMarker) ||
+             c.Body.Contains("[RESOLVED]") ||
+             c.Body.Contains("Reported by ") ||
+             (c.User?.Login?.Contains("bot", StringComparison.OrdinalIgnoreCase) == true))).ToList();
+
+        foreach (var comment in botComments)
+        {
+            // Skip comments that are already marked resolved
+            if (comment.Body.Contains(ResolvedMarker) || comment.Body.Contains("[RESOLVED]"))
+            {
+                continue;
+            }
+
+            // Find if this comment's file was modified in this PR
+            var changedFile = context.ChangedFiles.FirstOrDefault(f =>
+                f.FileName.Equals(comment.Path, StringComparison.OrdinalIgnoreCase));
+
+            if (changedFile == null)
+            {
+                // File wasn't modified in this PR context
+                continue;
+            }
+
+            int commentLine = 0;
+            var markerMatch = FindingMarkerRegex.Match(comment.Body);
+            if (markerMatch.Success && int.TryParse(markerMatch.Groups["line"].Value, out int parsedLine))
+            {
+                commentLine = parsedLine;
+            }
+            else if (!string.IsNullOrWhiteSpace(comment.DiffHunk))
+            {
+                var hunkMatch = System.Text.RegularExpressions.Regex.Match(comment.DiffHunk, @"\+(\d+)");
+                if (hunkMatch.Success && int.TryParse(hunkMatch.Groups[1].Value, out int hunkLine))
+                {
+                    commentLine = hunkLine;
+                }
+            }
+
+            // Check if there is still an active defect reported on this file near this line
+            bool isStillDefective = result.Comments.Any(c =>
+                c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(c.Line - commentLine) <= 3);
+
+            if (!isStillDefective)
+            {
+                _logger.LogInformation(
+                    "Comment #{CommentId} on {Path}:{Line} detected as RESOLVED. Updating comment in-place...",
+                    comment.Id, comment.Path, commentLine);
+
+                // Extract the diff of code added/modified that resolved this issue
+                var diffSnippet = _patchExtractor.ExtractResolutionDiff(changedFile.Patch, commentLine);
+
+                string codeSection = !string.IsNullOrWhiteSpace(diffSnippet)
+                    ? $"""
+                      **Code changes applied to resolve:**
+                      ```diff
+                      {diffSnippet}
+                      ```
+                      """
+                    : "*Code changes detected and verified on this file.*";
+
+                var commitSnippet = !string.IsNullOrWhiteSpace(context.HeadSha) && context.HeadSha.Length >= 7
+                    ? context.HeadSha[..7]
+                    : context.HeadSha ?? "latest commit";
+
+                string updatedBody = $"""
+                    ### ✅ [RESOLVED] Issue Fixed in `{commitSnippet}`
+
+                    {codeSection}
+
+                    ---
+                    <details>
+                    <summary>Original Finding</summary>
+
+                    {comment.Body}
+                    </details>
+
+                    {ResolvedMarker}
+                    """;
+
+                try
+                {
+                    await _client.PullRequest.ReviewComment.Edit(
+                        context.Owner,
+                        context.Repo,
+                        comment.Id,
+                        new PullRequestReviewCommentEdit(updatedBody));
+
+                    _logger.LogInformation("Successfully updated comment #{CommentId} to [RESOLVED].", comment.Id);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to edit review comment #{CommentId} on {Path}.", comment.Id, comment.Path);
+                }
+            }
+        }
     }
 
     private async Task PostReviewBatchAsync(
         PullRequestContext context,
         ReviewResult result,
-        string summaryMarkdown,
         CancellationToken cancellationToken)
     {
         // Fetch existing review comments on the PR to prevent duplicate comments across commits
@@ -158,13 +303,14 @@ public sealed class GitHubService : IGitHubService
         {
             if (comment.Line > 0)
             {
-                var body = $"{comment.Body}\n\n<sub>Reported by {comment.AnalyzerName}</sub>";
+                var marker = $"{FindingMarkerPrefix}file={comment.FilePath}:line={comment.Line} -->";
+                var body = $"{comment.Body}\n\n<sub>Reported by {comment.AnalyzerName}</sub>\n{marker}";
 
                 // Check if this exact finding has already been posted to avoid duplicate spam across runs
                 var snippet = comment.Body.Length > 80 ? comment.Body[..80] : comment.Body;
                 bool isDuplicate = existingComments.Any(e =>
                     e.Path.Equals(comment.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                    (e.Body.Contains(comment.Body) || e.Body.Contains(snippet)));
+                    (e.Body.Contains(marker) || e.Body.Contains(comment.Body) || e.Body.Contains(snippet)));
 
                 if (!isDuplicate)
                 {
@@ -194,6 +340,52 @@ public sealed class GitHubService : IGitHubService
             _ => "COMMENT"
         };
 
+        // Check previous reviews submitted by the bot to avoid redundant reviews if state is unchanged and no new comments
+        bool shouldSubmitReview = inlineComments.Count > 0;
+        try
+        {
+            var existingReviews = await _client.PullRequest.Review.GetAll(
+                context.Owner,
+                context.Repo,
+                context.PullRequestNumber);
+
+            var latestBotReview = existingReviews
+                .Where(r => r.User != null && (r.User.Login?.Contains("bot", StringComparison.OrdinalIgnoreCase) == true || r.User.Login == "github-actions[bot]"))
+                .OrderByDescending(r => r.SubmittedAt)
+                .FirstOrDefault();
+
+            if (latestBotReview == null)
+            {
+                shouldSubmitReview = true;
+            }
+            else
+            {
+                var latestStateStr = latestBotReview.State.StringValue;
+                if (!string.Equals(latestStateStr, reviewEventStr, StringComparison.OrdinalIgnoreCase))
+                {
+                    shouldSubmitReview = true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not check prior review state.");
+            shouldSubmitReview = true;
+        }
+
+        if (!shouldSubmitReview)
+        {
+            _logger.LogInformation("Review status unchanged ({Event}) and no new inline comments. Skipping duplicate review event submission.", reviewEventStr);
+            return;
+        }
+
+        string reviewSummaryNote = reviewEvent switch
+        {
+            PullRequestReviewEvent.Approve => "✅ **Automated Review: APPROVED** — All automated checks passed with zero defects. Full scorecard updated in the review dashboard above.",
+            PullRequestReviewEvent.RequestChanges => $"🚨 **Automated Review: CHANGES REQUESTED** — {result.CriticalCount + result.HighCount} high-priority defect(s) detected. Full scorecard updated in the review dashboard above.",
+            _ => "🟡 **Automated Review: COMMENT** — Advisory suggestions available. Full scorecard updated in the review dashboard above."
+        };
+
         _logger.LogInformation(
             "Submitting review to PR #{PrNumber} with event {Event} and {Count} inline comment(s)...",
             context.PullRequestNumber, reviewEvent, inlineComments.Count);
@@ -204,7 +396,7 @@ public sealed class GitHubService : IGitHubService
             {
                 CommitId = context.HeadSha,
                 Event = reviewEventStr,
-                Body = summaryMarkdown, // Posts the overall summary table in the review
+                Body = reviewSummaryNote,
                 Comments = inlineComments.Count > 0 ? inlineComments : null
             };
 
@@ -224,7 +416,7 @@ public sealed class GitHubService : IGitHubService
             }
             catch (ApiException ex) when (reviewPayload.Comments != null && ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
             {
-                _logger.LogWarning("GitHub rejected inline comments ({Message}). Retrying review with summary only...", ex.Message);
+                _logger.LogWarning("GitHub rejected inline comments ({Message}). Retrying review with summary note only...", ex.Message);
                 reviewPayload.Comments = null;
                 await _client.Connection.Post<PullRequestReview>(
                     endpoint,
@@ -255,8 +447,7 @@ public sealed class GitHubService : IGitHubService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to submit review batch. Falling back to summary comment.");
-            await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
+            _logger.LogWarning(ex, "Failed to submit review batch.");
         }
     }
 
