@@ -25,8 +25,8 @@ inputs:
     default: '10.0.x'
   fail-on-errors:
     description: 'Fail the GitHub workflow check if critical errors are detected.'
-    required: false
-    default: 'false'
+    required: true
+    default: 'true'
   review-event-mode:
     description: "GitHub review submission mode: 'dynamic' (default), 'strict', or 'comment-only'."
     required: false
