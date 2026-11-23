@@ -63,10 +63,18 @@ public sealed class ReviewEngine : IReviewEngine
             }
         }
 
-        return new ReviewResult
+        var reviewResult = new ReviewResult
         {
             Comments = allComments,
             SummaryMarkdown = summaryParts.Count > 0 ? string.Join("\n\n---\n\n", summaryParts) : null
         };
+
+        if (context.PriorDefects.Count > 0)
+        {
+            reviewResult.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
+            reviewResult.ActivePriorDefects.AddRange(context.PriorDefects.Where(d => !d.IsResolved));
+        }
+
+        return reviewResult;
     }
 }

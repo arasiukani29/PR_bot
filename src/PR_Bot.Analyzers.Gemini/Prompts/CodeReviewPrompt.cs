@@ -1,5 +1,8 @@
 namespace PR_Bot.Analyzers.Gemini.Prompts;
 
+using System.Text;
+using PR_Bot.Core.Models;
+
 /// <summary>
 /// Prompts and templates for LLM-powered code review acting as an Engineering Team Lead.
 /// </summary>
@@ -84,6 +87,14 @@ public static class CodeReviewPrompt
            - "Maintainability" (Priority 5): Swallowed exceptions, lost stack traces, poor logging hygiene, use of loose 'any' types in TypeScript, dead code.
            - ONE FINDING PER DEFECT: Never report the same code line under multiple categories. If a defect touches multiple areas, classify it strictly under the highest-priority category above.
 
+        15. DEFECT RECONCILIATION & PERSISTENT TRACKING:
+           - When 'PREVIOUS ACTIVE DEFECTS' are provided in the review payload, inspect each one against the new git diff and surrounding file context.
+           - For each previously reported defect, determine whether the developer's new code has fixed it:
+             * "resolved": The underlying issue has been resolved. Cite the exact code line and change in "resolution_note".
+             * "still_active": The code was untouched or the defect still persists. Explain why in "resolution_note".
+           - Populate the "defect_reconciliations" array with an entry for every prior defect.
+           - In parallel, exhaustively audit ALL changed files for ANY NEW defects under "file_reviews".
+
         PRIORITY CLASSIFICATION (4-TIER AI-DRIVEN IMPACT HIERARCHY):
         You (the AI Team Lead) decide the priority of every finding based on its real-world blast radius and exploitability:
 
@@ -123,6 +134,13 @@ public static class CodeReviewPrompt
 
         JSON SCHEMA:
         {
+          "defect_reconciliations": [
+            {
+              "comment_id": 1234567,
+              "status": "resolved|still_active",
+              "resolution_note": "Explanation citing the code change or why issue remains."
+            }
+          ],
           "file_reviews": [
             {
               "file": "path/to/file.ext",
@@ -155,14 +173,37 @@ public static class CodeReviewPrompt
 
     public static string BuildUserMessage(string prTitle, string author, string diffChunk)
     {
-        return BuildUserMessage(prTitle, author, prDescription: null, diffChunk);
+        return BuildUserMessage(prTitle, author, prDescription: null, diffChunk, priorDefects: null);
     }
 
     public static string BuildUserMessage(string prTitle, string author, string? prDescription, string diffChunk)
     {
+        return BuildUserMessage(prTitle, author, prDescription, diffChunk, priorDefects: null);
+    }
+
+    public static string BuildUserMessage(
+        string prTitle,
+        string author,
+        string? prDescription,
+        string diffChunk,
+        IReadOnlyList<PriorReviewDefect>? priorDefects)
+    {
         var descriptionBlock = string.IsNullOrWhiteSpace(prDescription)
             ? "*(No description provided)*"
             : prDescription.Trim();
+
+        var defectsSection = new StringBuilder();
+        if (priorDefects != null && priorDefects.Count > 0)
+        {
+            defectsSection.AppendLine("PREVIOUS ACTIVE DEFECTS FLAGGED IN PRIOR REVIEWS (MANDATORY RECONCILIATION):");
+            defectsSection.AppendLine("Systematically inspect the new diff and code context to verify if each prior defect below is now RESOLVED or STILL ACTIVE:");
+            foreach (var defect in priorDefects)
+            {
+                defectsSection.AppendLine($"- [Comment #{defect.CommentId}] File: {defect.FilePath} | Reported Line: {defect.Line} | Severity: {defect.Severity} | Title: {defect.Title}");
+                defectsSection.AppendLine($"  Original Issue: {defect.OriginalBody.Replace("\r", "").Replace("\n", " ").Trim()}");
+            }
+            defectsSection.AppendLine();
+        }
 
         return $"""
             Pull Request Title: {prTitle}
@@ -171,22 +212,23 @@ public static class CodeReviewPrompt
             Pull Request Description / Author Context:
             {descriptionBlock}
 
-            Git Unified Diff & File Context:
+            {defectsSection}Git Unified Diff & File Context:
             {diffChunk}
 
             MANDATORY REVIEW INSTRUCTIONS:
-            1. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance, Maintainability).
-            2. MULTI-FILE AUDIT: When multiple files are included in this diff payload, audit EVERY file thoroughly. Never stop after reviewing the first file.
-            3. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings. Report every defect discovered.
-            4. EXACT LINE & MULTILINE TARGETING: Provide the file, exact line number, optional start_line (when defect or suggestion spans multiple lines), priority, concrete explanation of impact, and an actionable code fix snippet. When providing a multi-line suggestion, set start_line and line to span all replaced lines so GitHub does not duplicate code. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
-            5. STRICT CATEGORY PRECEDENCE: Categorize using Security > Reliability > Input Validation > Performance > Maintainability. Passwords, secrets, or PII in logs MUST ALWAYS be "Security". Never report duplicate findings on the same line.
-            6. 4-TIER PRIORITY HIERARCHY:
+            1. DEFECT RECONCILIATION: For each item listed under PREVIOUS ACTIVE DEFECTS (if any), check if the latest code resolved it. Populate 'defect_reconciliations' with comment_id, status ('resolved' or 'still_active'), and resolution_note citing the code changes.
+            2. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance, Maintainability).
+            3. MULTI-FILE AUDIT: When multiple files are included in this diff payload, audit EVERY file thoroughly. Never stop after reviewing the first file.
+            4. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings. Report every defect discovered.
+            5. EXACT LINE & MULTILINE TARGETING: Provide the file, exact line number, optional start_line (when defect or suggestion spans multiple lines), priority, concrete explanation of impact, and an actionable code fix snippet. When providing a multi-line suggestion, set start_line and line to span all replaced lines so GitHub does not duplicate code. NEVER target braces (open or close braces) or empty lines; point to the exact statement containing the defect.
+            6. STRICT CATEGORY PRECEDENCE: Categorize using Security > Reliability > Input Validation > Performance > Maintainability. Passwords, secrets, or PII in logs MUST ALWAYS be "Security". Never report duplicate findings on the same line.
+            7. 4-TIER PRIORITY HIERARCHY:
                - Critical: Exploitable security vulnerabilities, plaintext passwords/PII in logs (CWE-532), production-halting crashes.
                - High: Major logic defects in core business flows, broken transaction boundaries, thread deadlocks.
                - Medium: Direct logic mistakes in changed code, off-by-one errors, unclosed resources, wrong status codes, missing string .trim() or length limits on inputs/credentials.
                - Low: Optional suggestions for improvements, idiomatic patterns, non-critical optimizations, replacing 'any' with strict types.
-            7. NO SPECULATION OR BIKESHEDDING: Review code strictly as written today. Never critique based on hypothetical future scenarios ("if in the future..."), and never suggest switching between valid equivalent design patterns.
-            8. Emit pure JSON strictly adhering to the schema (generate the 'file_reviews' array first with an entry for each file, followed by the executive 'summary').
+            8. NO SPECULATION OR BIKESHEDDING: Review code strictly as written today. Never critique based on hypothetical future scenarios ("if in the future..."), and never suggest switching between valid equivalent design patterns.
+            9. Emit pure JSON strictly adhering to the schema (include 'defect_reconciliations' if prior defects existed, 'file_reviews' with an entry for each file, and executive 'summary').
             """;
     }
 }

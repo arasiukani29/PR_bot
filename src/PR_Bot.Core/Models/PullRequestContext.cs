@@ -16,6 +16,12 @@ public sealed class PullRequestContext
     public required string HeadSha { get; init; }
     public ReviewEventMode ReviewEventMode { get; init; } = ReviewEventMode.Dynamic;
     public List<PullRequestFileChange> ChangedFiles { get; set; } = [];
+
+    /// <summary>
+    /// Existing bot findings retrieved from previous PR reviews.
+    /// Used by analyzers to reconcile resolved items and track persistent open defects.
+    /// </summary>
+    public List<PriorReviewDefect> PriorDefects { get; set; } = [];
 }
 
 /// <summary>

@@ -126,7 +126,97 @@ public sealed class GitHubService : IGitHubService
             "Fetched {Count} eligible files (out of {TotalFiles} total) for PR #{PrNumber}",
             changedFiles.Count, files.Count, context.PullRequestNumber);
 
+        // Load previously reported bot findings into context for continuous tracking & reconciliation
+        await PopulatePriorDefectsAsync(context, cancellationToken);
+
         return context;
+    }
+
+    public async Task PopulatePriorDefectsAsync(
+        PullRequestContext context,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var existingComments = await _client.PullRequest.ReviewComment.GetAll(
+                context.Owner,
+                context.Repo,
+                context.PullRequestNumber);
+
+            var priorDefects = new List<PriorReviewDefect>();
+            foreach (var comment in existingComments)
+            {
+                if (comment.Body == null) continue;
+
+                bool isBot = comment.Body.Contains(FindingMarkerPrefix) ||
+                             comment.Body.Contains(ResolvedMarker) ||
+                             comment.Body.Contains("[RESOLVED]") ||
+                             comment.Body.Contains("Reported by ") ||
+                             (comment.User?.Login?.Contains("bot", StringComparison.OrdinalIgnoreCase) == true);
+
+                if (!isBot) continue;
+
+                int line = 0;
+                var markerMatch = FindingMarkerRegex.Match(comment.Body);
+                if (markerMatch.Success && int.TryParse(markerMatch.Groups["line"].Value, out int parsedLine))
+                {
+                    line = parsedLine;
+                }
+                else if (!string.IsNullOrWhiteSpace(comment.DiffHunk))
+                {
+                    var hunkMatch = System.Text.RegularExpressions.Regex.Match(comment.DiffHunk, @"\+(\d+)");
+                    if (hunkMatch.Success && int.TryParse(hunkMatch.Groups[1].Value, out int hunkLine))
+                    {
+                        line = hunkLine;
+                    }
+                }
+
+                bool isResolved = comment.Body.Contains(ResolvedMarker) || comment.Body.Contains("[RESOLVED]");
+
+                var severity = AnalyzerSeverity.Warning;
+                var title = "Flagged finding";
+                if (comment.Body.Contains("[CRITICAL]", StringComparison.OrdinalIgnoreCase))
+                {
+                    severity = AnalyzerSeverity.Critical;
+                    title = "Critical defect";
+                }
+                else if (comment.Body.Contains("[HIGH]", StringComparison.OrdinalIgnoreCase))
+                {
+                    severity = AnalyzerSeverity.Error;
+                    title = "High priority defect";
+                }
+                else if (comment.Body.Contains("[LOW]", StringComparison.OrdinalIgnoreCase))
+                {
+                    severity = AnalyzerSeverity.Info;
+                    title = "Low priority suggestion";
+                }
+
+                var firstLine = comment.Body.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
+                if (!string.IsNullOrWhiteSpace(firstLine) && firstLine.Length < 100 && !firstLine.StartsWith("<!--"))
+                {
+                    title = firstLine;
+                }
+
+                priorDefects.Add(new PriorReviewDefect
+                {
+                    CommentId = comment.Id,
+                    FilePath = comment.Path,
+                    Line = line,
+                    Title = title,
+                    Severity = severity,
+                    OriginalBody = comment.Body,
+                    IsResolved = isResolved
+                });
+            }
+
+            context.PriorDefects = priorDefects;
+            _logger.LogInformation("Loaded {Count} prior bot comments ({Resolved} resolved, {Active} active) for PR #{PrNumber}",
+                priorDefects.Count, priorDefects.Count(d => d.IsResolved), priorDefects.Count(d => !d.IsResolved), context.PullRequestNumber);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not fetch prior review comments for defect context.");
+        }
     }
 
     public async Task PostReviewAsync(
@@ -137,16 +227,21 @@ public sealed class GitHubService : IGitHubService
         // 1. Reconcile any previously reported comments that have been resolved
         await ReconcileResolvedCommentsAsync(context, result, cancellationToken);
 
+        // Synchronize review result with reconciled defect states
+        result.ResolvedDefects.Clear();
+        result.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
+        result.ActivePriorDefects.Clear();
+        result.ActivePriorDefects.AddRange(context.PriorDefects.Where(d => !d.IsResolved));
+
         // 2. Build the full summary markdown dashboard
         var summaryMarkdown = BuildReviewMarkdown(context, result);
 
-        // 3. Upsert the sticky overall summary dashboard comment in-place.
-        // This edits the existing comment if one exists, or creates it once.
-        // This prevents duplicate summary blocks in the PR conversation timeline!
+        // 3. Update legacy issue comment if one was created by older bot runs (prevents stale comments)
         await UpsertSummaryCommentAsync(context, summaryMarkdown, cancellationToken);
 
-        // 4. Submit new inline comments and/or update the review status event (APPROVE/REQUEST_CHANGES)
-        await PostReviewBatchAsync(context, result, cancellationToken);
+        // 4. Submit new inline comments and/or update the unified review container (APPROVE/REQUEST_CHANGES)
+        // Packaging the complete dashboard in the review body ensures ONE unified review container!
+        await PostReviewBatchAsync(context, result, summaryMarkdown, cancellationToken);
     }
 
     public async Task ReconcileResolvedCommentsAsync(
@@ -217,19 +312,23 @@ public sealed class GitHubService : IGitHubService
                 }
             }
 
+            // Check if AI explicitly reconciled this defect as resolved
+            var priorMatch = context.PriorDefects.FirstOrDefault(d => d.CommentId == comment.Id);
+            bool aiSaysResolved = priorMatch?.IsResolved == true;
+
             // Check if there is still an active defect reported on this file near this line
             bool isStillDefective = result.Comments.Any(c =>
                 c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
                 Math.Abs(c.Line - commentLine) <= 3);
 
-            if (!isStillDefective)
+            if (aiSaysResolved || (!isStillDefective && changedFile != null))
             {
                 _logger.LogInformation(
                     "Comment #{CommentId} on {Path}:{Line} detected as RESOLVED. Updating comment in-place...",
                     comment.Id, comment.Path, commentLine);
 
                 // Extract the diff of code added/modified that resolved this issue
-                var diffSnippet = _patchExtractor.ExtractResolutionDiff(changedFile.Patch, commentLine);
+                var diffSnippet = _patchExtractor.ExtractResolutionDiff(changedFile?.Patch, commentLine);
 
                 string codeSection = !string.IsNullOrWhiteSpace(diffSnippet)
                     ? $"""
@@ -244,9 +343,13 @@ public sealed class GitHubService : IGitHubService
                     ? context.HeadSha[..7]
                     : context.HeadSha ?? "latest commit";
 
+                var explanationBlock = !string.IsNullOrWhiteSpace(priorMatch?.ResolutionExplanation)
+                    ? $"\n> 💡 **AI Verification:** {priorMatch.ResolutionExplanation}\n"
+                    : "";
+
                 string updatedBody = $"""
                     ### ✅ [RESOLVED] Issue Fixed in `{commitSnippet}`
-
+                    {explanationBlock}
                     {codeSection}
 
                     ---
@@ -268,6 +371,11 @@ public sealed class GitHubService : IGitHubService
                         new PullRequestReviewCommentEdit(updatedBody));
 
                     _logger.LogInformation("Successfully updated comment #{CommentId} to [RESOLVED].", comment.Id);
+
+                    if (priorMatch != null)
+                    {
+                        priorMatch.IsResolved = true;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -280,6 +388,7 @@ public sealed class GitHubService : IGitHubService
     private async Task PostReviewBatchAsync(
         PullRequestContext context,
         ReviewResult result,
+        string summaryMarkdown,
         CancellationToken cancellationToken)
     {
         // Fetch existing review comments on the PR to prevent duplicate comments across commits
@@ -340,8 +449,8 @@ public sealed class GitHubService : IGitHubService
             _ => "COMMENT"
         };
 
-        // Check previous reviews submitted by the bot to avoid redundant reviews if state is unchanged and no new comments
-        bool shouldSubmitReview = inlineComments.Count > 0;
+        // Check previous reviews submitted by the bot
+        PullRequestReview? latestBotReview = null;
         try
         {
             var existingReviews = await _client.PullRequest.Review.GetAll(
@@ -349,42 +458,44 @@ public sealed class GitHubService : IGitHubService
                 context.Repo,
                 context.PullRequestNumber);
 
-            var latestBotReview = existingReviews
+            latestBotReview = existingReviews
                 .Where(r => r.User != null && (r.User.Login?.Contains("bot", StringComparison.OrdinalIgnoreCase) == true || r.User.Login == "github-actions[bot]"))
                 .OrderByDescending(r => r.SubmittedAt)
                 .FirstOrDefault();
-
-            if (latestBotReview == null)
-            {
-                shouldSubmitReview = true;
-            }
-            else
-            {
-                var latestStateStr = latestBotReview.State.StringValue;
-                if (!string.Equals(latestStateStr, reviewEventStr, StringComparison.OrdinalIgnoreCase))
-                {
-                    shouldSubmitReview = true;
-                }
-            }
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Could not check prior review state.");
-            shouldSubmitReview = true;
         }
 
-        if (!shouldSubmitReview)
+        bool stateMatches = latestBotReview != null && reviewEvent switch
         {
-            _logger.LogInformation("Review status unchanged ({Event}) and no new inline comments. Skipping duplicate review event submission.", reviewEventStr);
-            return;
-        }
-
-        string reviewSummaryNote = reviewEvent switch
-        {
-            PullRequestReviewEvent.Approve => "✅ **Automated Review: APPROVED** — All automated checks passed with zero defects. Full scorecard updated in the review dashboard above.",
-            PullRequestReviewEvent.RequestChanges => $"🚨 **Automated Review: CHANGES REQUESTED** — {result.CriticalCount + result.HighCount} high-priority defect(s) detected. Full scorecard updated in the review dashboard above.",
-            _ => "🟡 **Automated Review: COMMENT** — Advisory suggestions available. Full scorecard updated in the review dashboard above."
+            PullRequestReviewEvent.Approve => latestBotReview.State.Value == PullRequestReviewState.Approved ||
+                                              string.Equals(latestBotReview.State.StringValue, "APPROVED", StringComparison.OrdinalIgnoreCase),
+            PullRequestReviewEvent.RequestChanges => latestBotReview.State.Value == PullRequestReviewState.ChangesRequested ||
+                                                     string.Equals(latestBotReview.State.StringValue, "CHANGES_REQUESTED", StringComparison.OrdinalIgnoreCase),
+            _ => latestBotReview.State.Value == PullRequestReviewState.Commented ||
+                 string.Equals(latestBotReview.State.StringValue, "COMMENTED", StringComparison.OrdinalIgnoreCase)
         };
+
+        // If the review state is unchanged and there are no new inline comments, update the review body in-place!
+        if (latestBotReview != null && stateMatches && inlineComments.Count == 0)
+        {
+            _logger.LogInformation("Review status unchanged ({Event}) and no new inline comments. Updating existing review #{ReviewId} body in-place...", reviewEventStr, latestBotReview.Id);
+            try
+            {
+                var updateEndpoint = new Uri($"repos/{context.Owner}/{context.Repo}/pulls/{context.PullRequestNumber}/reviews/{latestBotReview.Id}", UriKind.Relative);
+                await _client.Connection.Put<PullRequestReview>(
+                    updateEndpoint,
+                    new { body = summaryMarkdown });
+                _logger.LogInformation("Successfully updated existing review #{ReviewId} body in-place.", latestBotReview.Id);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not update review body in-place. Submitting new review event.");
+            }
+        }
 
         _logger.LogInformation(
             "Submitting review to PR #{PrNumber} with event {Event} and {Count} inline comment(s)...",
@@ -396,7 +507,7 @@ public sealed class GitHubService : IGitHubService
             {
                 CommitId = context.HeadSha,
                 Event = reviewEventStr,
-                Body = reviewSummaryNote,
+                Body = summaryMarkdown,
                 Comments = inlineComments.Count > 0 ? inlineComments : null
             };
 
@@ -458,7 +569,7 @@ public sealed class GitHubService : IGitHubService
     {
         try
         {
-            // Check existing comments for our unique bot marker
+            // If an older version of the bot previously created an issue comment, update it in-place so it's not stale.
             var existingComments = await _client.Issue.Comment.GetAllForIssue(
                 context.Owner,
                 context.Repo,
@@ -469,28 +580,18 @@ public sealed class GitHubService : IGitHubService
 
             if (previousBotComment != null)
             {
-                _logger.LogInformation("Updating existing PR review comment ID {Id}...", previousBotComment.Id);
+                _logger.LogInformation("Updating legacy PR review comment ID {Id}...", previousBotComment.Id);
                 await _client.Issue.Comment.Update(
                     context.Owner,
                     context.Repo,
                     previousBotComment.Id,
                     summaryMarkdown);
-                _logger.LogInformation("Updated existing review comment.");
-            }
-            else
-            {
-                _logger.LogInformation("Posting new PR review summary comment...");
-                await _client.Issue.Comment.Create(
-                    context.Owner,
-                    context.Repo,
-                    context.PullRequestNumber,
-                    summaryMarkdown);
-                _logger.LogInformation("Created new review summary comment.");
+                _logger.LogInformation("Updated legacy review comment.");
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to post or update summary comment on PR #{PrNumber}", context.PullRequestNumber);
+            _logger.LogDebug(ex, "Could not update legacy summary comment on PR #{PrNumber}", context.PullRequestNumber);
         }
     }
 
@@ -600,6 +701,45 @@ public sealed class GitHubService : IGitHubService
             sb.AppendLine();
         }
 
+        // 7. Resolved Defect Reconciliation (if any resolved)
+        if (result.ResolvedDefects.Count > 0)
+        {
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine($"### ✅ Resolved Issues ({result.ResolvedDefects.Count})");
+            sb.AppendLine();
+            sb.AppendLine("<details>");
+            sb.AppendLine($"<summary><b>Click to view {result.ResolvedDefects.Count} verified resolved defect{(result.ResolvedDefects.Count > 1 ? "s" : "")}</b></summary>");
+            sb.AppendLine();
+            foreach (var resolved in result.ResolvedDefects)
+            {
+                var note = !string.IsNullOrWhiteSpace(resolved.ResolutionExplanation)
+                    ? $" — *{resolved.ResolutionExplanation}*"
+                    : "";
+                sb.AppendLine($"- ✅ `{resolved.FilePath}:{resolved.Line}`: {resolved.Title}{note}");
+            }
+            sb.AppendLine("</details>");
+            sb.AppendLine();
+        }
+
+        // 7b. Persistent Unresolved Prior Issues (if any still open)
+        if (result.ActivePriorDefects.Count > 0)
+        {
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine($"### ⏳ Persistent Open Defects ({result.ActivePriorDefects.Count})");
+            sb.AppendLine();
+            sb.AppendLine("<details open>");
+            sb.AppendLine($"<summary><b>Click to view {result.ActivePriorDefects.Count} issue{(result.ActivePriorDefects.Count > 1 ? "s" : "")} still awaiting resolution</b></summary>");
+            sb.AppendLine();
+            foreach (var active in result.ActivePriorDefects)
+            {
+                sb.AppendLine($"- ⚠️ `{active.FilePath}:{active.Line}`: [{active.Severity}] {active.Title}");
+            }
+            sb.AppendLine("</details>");
+            sb.AppendLine();
+        }
+
         // 8. Detailed Findings Grouped by Priority
         if (result.Comments.Count > 0)
         {
@@ -644,7 +784,7 @@ public sealed class GitHubService : IGitHubService
                 sb.AppendLine();
             }
         }
-        else
+        else if (result.TotalDefects == 0)
         {
             sb.AppendLine("---");
             sb.AppendLine();
@@ -662,7 +802,7 @@ public sealed class GitHubService : IGitHubService
         if (totalCount > 0)
         {
             sb.AppendLine("- 🛠️ **Apply Fixes:** Open the **[Files changed]** tab above to review inline comments and apply one-click suggestions.");
-            sb.AppendLine("- 🔄 **Automatic Re-verification:** Push your fix commit to this branch — the bot will re-evaluate modified files and automatically mark resolved comments as `[Outdated]`.");
+            sb.AppendLine("- 🔄 **Automatic Re-verification:** Push your fix commit to this branch — the bot will re-evaluate modified files and update resolved comments in-place.");
         }
         else
         {
@@ -695,7 +835,7 @@ public sealed class GitHubService : IGitHubService
                 return PullRequestReviewEvent.RequestChanges;
             }
 
-            return result.Comments.Count == 0
+            return result.TotalDefects == 0
                 ? PullRequestReviewEvent.Approve
                 : PullRequestReviewEvent.Comment;
         }
@@ -707,8 +847,8 @@ public sealed class GitHubService : IGitHubService
             return PullRequestReviewEvent.RequestChanges;
         }
 
-        // 100% clean PR with zero issues -> Approve
-        if (result.Comments.Count == 0)
+        // 100% clean PR with zero issues (both new and prior active) -> Approve
+        if (result.TotalDefects == 0)
         {
             return PullRequestReviewEvent.Approve;
         }

@@ -7,14 +7,31 @@ public sealed class ReviewResult
 {
     public List<ReviewComment> Comments { get; init; } = [];
     public string? SummaryMarkdown { get; set; }
-    public bool HasErrors => Comments.Any(c => c.Severity >= AnalyzerSeverity.Error);
-    public bool HasWarnings => Comments.Any(c => c.Severity == AnalyzerSeverity.Warning);
-    public bool HasDefectsAtOrAbove(AnalyzerSeverity minSeverity) => Comments.Any(c => c.Severity >= minSeverity);
 
-    public int CriticalCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Critical);
-    public int HighCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Error);
-    public int MediumCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Warning);
-    public int LowCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Info);
+    /// <summary>
+    /// Findings from prior runs that have been confirmed resolved in the latest code.
+    /// </summary>
+    public List<PriorReviewDefect> ResolvedDefects { get; init; } = [];
+
+    /// <summary>
+    /// Findings from prior runs that are still active (unresolved) in the PR.
+    /// </summary>
+    public List<PriorReviewDefect> ActivePriorDefects { get; init; } = [];
+
+    public bool HasErrors => CriticalCount > 0 || HighCount > 0;
+    public bool HasWarnings => MediumCount > 0;
+    public bool HasDefectsAtOrAbove(AnalyzerSeverity minSeverity) =>
+        Comments.Any(c => c.Severity >= minSeverity) || ActivePriorDefects.Any(d => d.Severity >= minSeverity);
+
+    public int CriticalCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Critical) + ActivePriorDefects.Count(d => d.Severity == AnalyzerSeverity.Critical);
+    public int HighCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Error) + ActivePriorDefects.Count(d => d.Severity == AnalyzerSeverity.Error);
+    public int MediumCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Warning) + ActivePriorDefects.Count(d => d.Severity == AnalyzerSeverity.Warning);
+    public int LowCount => Comments.Count(c => c.Severity == AnalyzerSeverity.Info) + ActivePriorDefects.Count(d => d.Severity == AnalyzerSeverity.Info);
+    public int TotalDefects => CriticalCount + HighCount + MediumCount + LowCount;
+
+    public int NewFindingsCount => Comments.Count;
+    public int ResolvedCount => ResolvedDefects.Count;
+    public int ActivePriorCount => ActivePriorDefects.Count;
 
     /// <summary>
     /// Calculated code health score from 0 (critical defects) to 100 (clean code).

@@ -1194,4 +1194,171 @@ public class GeminiReviewAnalyzerTests
         // Assert: Markdown header displays (Lines 8-12) instead of (Line 12)
         markdown.Should().Contain("`login.html` (Lines 8-12)");
     }
+
+    [Fact]
+    public void ParseGeminiResponse_WithDefectReconciliation_ReconcilesPriorDefects()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "author",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 101,
+                    FilePath = "Program.cs",
+                    Line = 10,
+                    Title = "Singleton lifetime for stateful service",
+                    Severity = AnalyzerSeverity.Error,
+                    OriginalBody = "Original issue body",
+                    IsResolved = false
+                },
+                new PriorReviewDefect
+                {
+                    CommentId = 102,
+                    FilePath = "Controllers/TasksController.cs",
+                    Line = 34,
+                    Title = "Missing null check",
+                    Severity = AnalyzerSeverity.Warning,
+                    OriginalBody = "Null check issue",
+                    IsResolved = false
+                }
+            ]
+        };
+
+        var json = """
+        {
+          "defect_reconciliations": [
+            {
+              "comment_id": 101,
+              "status": "resolved",
+              "resolution_note": "Changed AddSingleton to AddScoped on line 10"
+            },
+            {
+              "comment_id": 102,
+              "status": "still_active",
+              "resolution_note": "Line 34 still does not check for null DTO"
+            }
+          ],
+          "file_reviews": [
+            {
+              "file": "Program.cs",
+              "findings": []
+            }
+          ],
+          "summary": "Verified resolution of issue #101; #102 remains active."
+        }
+        """;
+
+        // Act
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json, context);
+
+        // Assert
+        summary.Should().Contain("Verified resolution");
+        context.PriorDefects.First(d => d.CommentId == 101).IsResolved.Should().BeTrue();
+        context.PriorDefects.First(d => d.CommentId == 101).ResolutionExplanation.Should().Contain("AddScoped");
+
+        context.PriorDefects.First(d => d.CommentId == 102).IsResolved.Should().BeFalse();
+        context.PriorDefects.First(d => d.CommentId == 102).ResolutionExplanation.Should().BeNull();
+    }
+
+    [Fact]
+    public void DetermineReviewEvent_WhenZeroNewFindingsButActivePriorHighDefect_ReturnsRequestChanges()
+    {
+        // Arrange: Commit 2 has zero new findings, but prior high-priority defect was NOT resolved
+        var result = new ReviewResult
+        {
+            Comments = [], // Zero new findings
+            ActivePriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 55,
+                    FilePath = "Service.cs",
+                    Line = 20,
+                    Title = "Unsafe thread access",
+                    Severity = AnalyzerSeverity.Error,
+                    OriginalBody = "Race condition",
+                    IsResolved = false
+                }
+            ]
+        };
+
+        // Act
+        var reviewEvent = PR_Bot.Core.Services.GitHubService.DetermineReviewEvent(result);
+
+        // Assert: Must NOT approve! Must return RequestChanges because high defect persists!
+        reviewEvent.Should().Be(Octokit.PullRequestReviewEvent.RequestChanges);
+    }
+
+    [Fact]
+    public void DetermineReviewEvent_WhenZeroNewFindingsAndZeroActivePriorDefects_ReturnsApprove()
+    {
+        // Arrange: All prior defects resolved, zero new findings
+        var result = new ReviewResult
+        {
+            Comments = [],
+            ResolvedDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 55,
+                    FilePath = "Service.cs",
+                    Line = 20,
+                    Title = "Fixed race condition",
+                    Severity = AnalyzerSeverity.Error,
+                    OriginalBody = "Race condition",
+                    IsResolved = true
+                }
+            ],
+            ActivePriorDefects = []
+        };
+
+        // Act
+        var reviewEvent = PR_Bot.Core.Services.GitHubService.DetermineReviewEvent(result);
+
+        // Assert: 100% clean PR with zero active defects -> Approve
+        reviewEvent.Should().Be(Octokit.PullRequestReviewEvent.Approve);
+    }
+
+    [Fact]
+    public void CodeReviewPrompt_WithPriorDefects_IncludesReconciliationSection()
+    {
+        // Arrange
+        var priorDefects = new List<PriorReviewDefect>
+        {
+            new()
+            {
+                CommentId = 999,
+                FilePath = "App.cs",
+                Line = 42,
+                Title = "Missing Dispose call",
+                Severity = AnalyzerSeverity.Error,
+                OriginalBody = "Stream is never disposed",
+                IsResolved = false
+            }
+        };
+
+        // Act
+        var message = PR_Bot.Analyzers.Gemini.Prompts.CodeReviewPrompt.BuildUserMessage(
+            "Fix streams",
+            "developer",
+            "PR description",
+            "diff content",
+            priorDefects);
+
+        // Assert
+        message.Should().Contain("PREVIOUS ACTIVE DEFECTS FLAGGED IN PRIOR REVIEWS (MANDATORY RECONCILIATION)");
+        message.Should().Contain("Comment #999");
+        message.Should().Contain("App.cs");
+        message.Should().Contain("Missing Dispose call");
+    }
 }

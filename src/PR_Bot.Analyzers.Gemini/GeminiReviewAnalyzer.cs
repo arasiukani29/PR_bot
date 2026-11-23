@@ -77,7 +77,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             var chunk = chunks[i];
             _logger.LogInformation("Analyzing chunk {Index}/{Total} ({Length} chars)...", i + 1, chunks.Count, chunk.Length);
 
-            var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, context.Description, chunk);
+            var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, context.Description, chunk, context.PriorDefects);
             string? jsonResponse = null;
 
             var modelQueue = new List<string> { currentWorkingModel };
@@ -418,6 +418,49 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             if (root.TryGetProperty("summary", out var summaryProp) && summaryProp.ValueKind == JsonValueKind.String)
             {
                 summary = summaryProp.GetString();
+            }
+
+            // 0. Process defect reconciliations (verifying whether prior reported defects are resolved or still active)
+            if (root.TryGetProperty("defect_reconciliations", out var reconciliations) &&
+                reconciliations.ValueKind == JsonValueKind.Array &&
+                context != null &&
+                context.PriorDefects.Count > 0)
+            {
+                foreach (var item in reconciliations.EnumerateArray())
+                {
+                    long commentId = 0;
+                    if (item.TryGetProperty("comment_id", out var idProp))
+                    {
+                        if (idProp.ValueKind == JsonValueKind.Number && idProp.TryGetInt64(out var idNum))
+                        {
+                            commentId = idNum;
+                        }
+                        else if (idProp.ValueKind == JsonValueKind.String && long.TryParse(idProp.GetString(), out var parsedId))
+                        {
+                            commentId = parsedId;
+                        }
+                    }
+
+                    var status = item.TryGetProperty("status", out var statusProp) ? statusProp.GetString() ?? "" : "";
+                    var note = item.TryGetProperty("resolution_note", out var noteProp) ? noteProp.GetString() : null;
+
+                    var priorDefect = context.PriorDefects.FirstOrDefault(d => d.CommentId == commentId);
+                    if (priorDefect != null)
+                    {
+                        if (status.Equals("resolved", StringComparison.OrdinalIgnoreCase))
+                        {
+                            priorDefect.IsResolved = true;
+                            priorDefect.ResolutionExplanation = note;
+                            _logger.LogInformation("Prior defect #{CommentId} on {File}:{Line} verified by AI as RESOLVED: {Note}",
+                                commentId, priorDefect.FilePath, priorDefect.Line, note);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Prior defect #{CommentId} on {File}:{Line} verified by AI as STILL ACTIVE: {Note}",
+                                commentId, priorDefect.FilePath, priorDefect.Line, note);
+                        }
+                    }
+                }
             }
 
             // 1. Process per-file reviews schema (Approach 2: guarantees multi-file completeness in single API call)
