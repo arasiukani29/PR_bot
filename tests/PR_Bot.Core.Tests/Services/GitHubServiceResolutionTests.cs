@@ -263,8 +263,30 @@ public class GitHubServiceResolutionTests
             Times.Never);
     }
 
+    private static User CreateUser(string login)
+    {
+        var user = new User();
+        typeof(Account).GetProperty("Login")?.GetSetMethod(true)?.Invoke(user, [login]);
+        return user;
+    }
+
+    private static PullRequestReview CreateReview(long id, PullRequestReviewState state)
+    {
+        return new PullRequestReview(
+            id,
+            "nodeId",
+            "commitId",
+            CreateUser("github-actions[bot]"),
+            "body",
+            "htmlUrl",
+            "pullRequestUrl",
+            state,
+            AuthorAssociation.None,
+            DateTimeOffset.UtcNow);
+    }
+
     [Fact]
-    public async Task PostReviewAsync_WhenExistingSummaryCommentExists_UpdatesInPlaceInsteadOfCreatingNew()
+    public async Task PostReviewAsync_SubmitsAllInOneReview_WithDashboardAsReviewBodyAndNoSeparateIssueComment()
     {
         // Arrange
         var context = new PullRequestContext
@@ -280,15 +302,6 @@ public class GitHubServiceResolutionTests
             ChangedFiles = []
         };
 
-        var existingIssueComments = new List<IssueComment>
-        {
-            CreateIssueComment(555, $"Previous review dashboard\n{GitHubService.BotCommentMarker}")
-        };
-
-        _issueCommentsMock
-            .Setup(i => i.GetAllForIssue("test-owner", "test-repo", 42))
-            .ReturnsAsync(existingIssueComments);
-
         _reviewCommentsMock
             .Setup(r => r.GetAll("test-owner", "test-repo", 42))
             .ReturnsAsync(new List<PullRequestReviewComment>());
@@ -300,7 +313,29 @@ public class GitHubServiceResolutionTests
             .ReturnsAsync(new List<PullRequestReview>());
 
         var connectionMock = new Mock<IConnection>();
+        var putResponseMock = new Mock<IApiResponse<PullRequestReview>>();
+        connectionMock
+            .Setup(c => c.Put<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<object>()))
+            .ReturnsAsync(putResponseMock.Object);
         _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var apiResponseMock = new Mock<IApiResponse<PullRequestReview>>();
+        apiResponseMock.SetupGet(r => r.Body).Returns(CreateReview(1, PullRequestReviewState.Approved));
+
+        object? capturedReviewPayload = null;
+        connectionMock
+            .Setup(c => c.Post<PullRequestReview>(
+                It.Is<Uri>(u => u.ToString().Contains("/reviews")),
+                It.IsAny<object>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>((_, payload, _, _, _, _) =>
+                capturedReviewPayload = payload)
+            .ReturnsAsync(apiResponseMock.Object);
 
         var service = new GitHubService(
             _gitHubClientMock.Object,
@@ -311,14 +346,86 @@ public class GitHubServiceResolutionTests
         // Act
         await service.PostReviewAsync(context, result);
 
-        // Assert
-        // Should UPDATE existing comment 555, NOT CREATE a new one!
-        _issueCommentsMock.Verify(
-            i => i.Update("test-owner", "test-repo", 555, It.Is<string>(b => b.Contains(GitHubService.BotCommentMarker))),
-            Times.Once);
+        // Assert: All-in-One Review submitted with dashboard table inside review body
+        capturedReviewPayload.Should().NotBeNull();
+        var bodyProp = capturedReviewPayload!.GetType().GetProperty("Body")?.GetValue(capturedReviewPayload) as string;
+        bodyProp.Should().NotBeNull();
+        bodyProp.Should().Contain(GitHubService.BotCommentMarker);
+        bodyProp.Should().Contain("Code Quality & Health Scorecard");
 
+        // Verify that NO separate Issue Comment was created!
         _issueCommentsMock.Verify(
             i => i.Create(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>()),
+            Times.Never);
+        _issueCommentsMock.Verify(
+            i => i.Update(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task PostReviewAsync_WhenPreviousReviewExistsAndStateUnchanged_UpdatesReviewBodyInPlaceViaPut()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "1234567890abcdef",
+            ChangedFiles = []
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReviewComment>());
+
+        var existingReview = CreateReview(888, PullRequestReviewState.Approved);
+
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReview> { existingReview });
+
+        var connectionMock = new Mock<IConnection>();
+        var putResponseMock = new Mock<IApiResponse<PullRequestReview>>();
+        connectionMock
+            .Setup(c => c.Put<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<object>()))
+            .ReturnsAsync(putResponseMock.Object);
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Result has 0 defects (Approve)
+        var result = new ReviewResult();
+
+        // Act
+        await service.PostReviewAsync(context, result);
+
+        // Assert: Calls PUT on reviews/888 to update in-place without creating a new review
+        connectionMock.Verify(
+            c => c.Put<PullRequestReview>(
+                It.Is<Uri>(u => u.ToString().Contains("/reviews/888")),
+                It.IsAny<object>()),
+            Times.Once);
+
+        // Did not post a new review
+        connectionMock.Verify(
+            c => c.Post<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<object>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()),
             Times.Never);
     }
 }
