@@ -209,10 +209,11 @@ public static class CodeReviewPrompt
         var resolvedPrior = priorDefects?.Where(d => d.IsResolved).ToList();
         if (resolvedPrior != null && resolvedPrior.Count > 0)
         {
-            defectsSection.AppendLine("ALREADY RESOLVED DEFECTS FROM PRIOR COMMITS (DO NOT RE-REPORT UNLESS REGRESSED):");
+            defectsSection.AppendLine("ALREADY RESOLVED DEFECTS (AUDIT FOR REGRESSIONS):");
+            defectsSection.AppendLine("The following issues were resolved in earlier commits. Systematically inspect changed files to ensure none of these defects were reintroduced. If a resolved defect has been re-added or reintroduced in the latest code, you MUST report it as an active defect finding in 'file_reviews'!");
             foreach (var defect in resolvedPrior)
             {
-                defectsSection.AppendLine($"- [RESOLVED] File: {defect.FilePath} | Line: {defect.Line} | Title: {defect.Title}");
+                defectsSection.AppendLine($"- [Resolved in earlier commit] File: {defect.FilePath} | Line: {defect.Line} | Title: {defect.Title}");
             }
             defectsSection.AppendLine();
         }

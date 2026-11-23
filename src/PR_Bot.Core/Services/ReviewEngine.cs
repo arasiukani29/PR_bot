@@ -71,13 +71,35 @@ public sealed class ReviewEngine : IReviewEngine
 
         if (context.PriorDefects.Count > 0)
         {
-            reviewResult.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
+            // Detect regressions: if an analyzer reported a defect on a file & line that was
+            // previously resolved in an earlier commit, the defect has REGRESSED in the latest code!
+            foreach (var comment in reviewResult.Comments)
+            {
+                var regressed = context.PriorDefects.FirstOrDefault(p =>
+                    p.WasPreviouslyResolved &&
+                    p.FilePath.Equals(comment.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                    Math.Abs(p.Line - comment.Line) <= 3);
 
-            // Ensure any findings that were confirmed resolved are not retained in Comments
-            reviewResult.Comments.RemoveAll(c =>
-                reviewResult.ResolvedDefects.Any(r =>
-                    r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                    Math.Abs(r.Line - c.Line) <= 3));
+                if (regressed != null)
+                {
+                    _logger.LogWarning("Regression detected on {File}:{Line}! Marking prior defect #{CommentId} as un-resolved.",
+                        regressed.FilePath, regressed.Line, regressed.CommentId);
+                    regressed.IsResolved = false;
+                    regressed.ResolutionExplanation = null;
+                }
+            }
+
+            // Only remove duplicates if the defect was newly resolved by AI in this run
+            var newlyResolved = context.PriorDefects.Where(p => !p.WasPreviouslyResolved && p.IsResolved).ToList();
+            if (newlyResolved.Count > 0)
+            {
+                reviewResult.Comments.RemoveAll(c =>
+                    newlyResolved.Any(r =>
+                        r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                        Math.Abs(c.Line - c.Line) <= 3));
+            }
+
+            reviewResult.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
 
             // Deduplicate ActivePriorDefects against Comments so defects are never double counted
             reviewResult.ActivePriorDefects.AddRange(

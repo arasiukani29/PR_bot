@@ -42,6 +42,12 @@ public sealed class PriorReviewDefect
     public bool IsResolved { get; set; }
 
     /// <summary>
+    /// Whether this finding was already marked resolved on GitHub prior to this review run.
+    /// Used to distinguish fresh resolutions from regressions when code is modified again.
+    /// </summary>
+    public bool WasPreviouslyResolved { get; set; }
+
+    /// <summary>
     /// Optional explanation from AI or patch analysis of how the defect was resolved.
     /// </summary>
     public string? ResolutionExplanation { get; set; }

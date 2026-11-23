@@ -205,7 +205,8 @@ public sealed class GitHubService : IGitHubService
                     Title = title,
                     Severity = severity,
                     OriginalBody = comment.Body,
-                    IsResolved = isResolved
+                    IsResolved = isResolved,
+                    WasPreviouslyResolved = isResolved
                 });
             }
 
@@ -224,15 +225,31 @@ public sealed class GitHubService : IGitHubService
         ReviewResult result,
         CancellationToken cancellationToken = default)
     {
-        // 0. Ensure any findings in result.Comments matching already-resolved prior defects are removed
-        result.Comments.RemoveAll(c =>
-            context.PriorDefects.Any(r =>
-                r.IsResolved &&
-                r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                Math.Abs(r.Line - c.Line) <= 3));
+        // Detect regressions: if an analyzer reported a defect on a file & line that was
+        // previously resolved in an earlier commit, the defect has REGRESSED in the latest code!
+        bool hasRegressions = false;
+        foreach (var finding in result.Comments)
+        {
+            var regressedPrior = context.PriorDefects.FirstOrDefault(p =>
+                p.WasPreviouslyResolved &&
+                p.FilePath.Equals(finding.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(p.Line - finding.Line) <= 3);
+
+            if (regressedPrior != null)
+            {
+                _logger.LogWarning(
+                    "REGRESSION DETECTED on {File}:{Line}! Previously resolved comment #{CommentId} is defective again in commit {HeadSha}.",
+                    regressedPrior.FilePath, regressedPrior.Line, regressedPrior.CommentId, context.HeadSha);
+
+                regressedPrior.IsResolved = false;
+                regressedPrior.ResolutionExplanation = null;
+                hasRegressions = true;
+            }
+        }
 
         // Determine if brand-new defects exist that were not previously reported as active comments
-        bool hasNewDefects = result.Comments.Any(c =>
+        // Note: Any regression is considered a new defect requiring review notification!
+        bool hasNewDefects = hasRegressions || result.Comments.Any(c =>
             !context.PriorDefects.Any(p =>
                 !p.IsResolved &&
                 p.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
@@ -243,17 +260,20 @@ public sealed class GitHubService : IGitHubService
         // If hasNewDefects is false: preserves existing active comments and ONLY edits resolved comments!
         var deletedCommentIds = await ReconcileResolvedCommentsAsync(context, result, hasNewDefects, cancellationToken);
 
+        // If an issue was explicitly confirmed resolved by AI in THIS run (via defect_reconciliations),
+        // remove any duplicate finding emitted by the AI on that line in this same run.
+        var newlyResolved = context.PriorDefects.Where(p => !p.WasPreviouslyResolved && p.IsResolved).ToList();
+        if (newlyResolved.Count > 0)
+        {
+            result.Comments.RemoveAll(c =>
+                newlyResolved.Any(r =>
+                    r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                    Math.Abs(r.Line - c.Line) <= 3));
+        }
+
         // Synchronize review result with reconciled defect states
         result.ResolvedDefects.Clear();
         result.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
-
-        // Critical: A resolved defect MUST NEVER be counted as an active defect in result.Comments!
-        // If an issue on this file & line was verified as resolved, remove any duplicate/ghost finding
-        // from result.Comments so it does not inflate the defect count or health scorecard!
-        result.Comments.RemoveAll(c =>
-            result.ResolvedDefects.Any(r =>
-                r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                Math.Abs(r.Line - c.Line) <= 3));
 
         // Deduplicate ActivePriorDefects against Comments so defects are never double counted
         result.ActivePriorDefects.Clear();
