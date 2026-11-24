@@ -415,10 +415,14 @@ public sealed class GitHubService : IGitHubService
                     ? $"\n> 💡 **AI Verification:** {priorMatch.ResolutionExplanation}\n"
                     : "";
 
+                // 1. Edit the parent comment so it clearly shows [RESOLVED]
                 string updatedBody = $"""
                     ### ✅ [RESOLVED] Issue Fixed in `{commitSnippet}`
                     {explanationBlock}
+                    **Code changes applied to resolve:**
+                    ```diff
                     {codeSection}
+                    ```
 
                     ---
                     <details>
@@ -449,39 +453,47 @@ public sealed class GitHubService : IGitHubService
                 {
                     _logger.LogWarning(ex, "Failed to edit review comment #{CommentId} on {Path}.", comment.Id, comment.Path);
                 }
+
+                // 2. Post thread reply preserving complete conversation history
+                string replyBody = $"""
+                    ✅ Verified resolved in commit `{commitSnippet}`.
+                    {explanationBlock}
+                    <details open>
+                    <summary>Resolution Diff</summary>
+
+                    ```diff
+                    {codeSection}
+                    ```
+                    </details>
+
+                    {ResolvedMarker}
+                    """;
+
+                try
+                {
+                    await _client.PullRequest.ReviewComment.CreateReply(
+                        context.Owner,
+                        context.Repo,
+                        context.PullRequestNumber,
+                        new PullRequestReviewCommentReplyCreate(replyBody, comment.Id));
+
+                    _logger.LogInformation("Successfully posted resolution reply to comment thread #{CommentId}.", comment.Id);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to post thread reply to review comment #{CommentId}.", comment.Id);
+                }
+
+                // 3. Resolve review thread in GitHub natively via GraphQL
+                await ResolveThreadViaGraphQLAsync(context.Owner, context.Repo, context.PullRequestNumber, comment.Id, cancellationToken);
             }
             else
             {
                 // Defect is STILL ACTIVE from an earlier review run.
-                // If brand-new defects exist elsewhere, we delete this comment so it rolls forward
-                // cleanly into the new review batch attached to the new review container.
-                // If NO new defects exist, we PRESERVE this existing comment untouched on GitHub (edit only resolved comments!).
-                if (hasNewDefects)
-                {
-                    try
-                    {
-                        await _client.PullRequest.ReviewComment.Delete(
-                            context.Owner,
-                            context.Repo,
-                            comment.Id);
-
-                        deletedCommentIds.Add(comment.Id);
-
-                        _logger.LogInformation(
-                            "Deleted old active comment #{CommentId} on {Path}:{Line} so it rolls forward to latest review batch with new defects.",
-                            comment.Id, comment.Path, commentLine);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogDebug(ex, "Could not delete old active comment #{CommentId} on {Path}.", comment.Id, comment.Path);
-                    }
-                }
-                else
-                {
-                    _logger.LogInformation(
-                        "Preserving existing active comment #{CommentId} on {Path}:{Line} (no new defects found; updating dashboard only).",
-                        comment.Id, comment.Path, commentLine);
-                }
+                // We PRESERVE this existing comment untouched on GitHub so thread history and developer replies are preserved!
+                _logger.LogInformation(
+                    "Preserving existing active comment #{CommentId} on {Path}:{Line} (keeping thread history intact).",
+                    comment.Id, comment.Path, commentLine);
             }
         }
 
@@ -555,8 +567,7 @@ public sealed class GitHubService : IGitHubService
             }
         }
 
-        // Only roll forward active prior defects if new defects exist.
-        // When no new defects exist, existing active comments were preserved on GitHub, so no new inline comments are needed!
+        // Only roll forward active prior defects if new defects exist and they are not already posted on PR.
         if (hasNewDefects)
         {
             foreach (var activeDefect in result.ActivePriorDefects)
@@ -569,7 +580,11 @@ public sealed class GitHubService : IGitHubService
                         c.Path.Equals(activeDefect.FilePath, StringComparison.OrdinalIgnoreCase) &&
                         c.Line == activeDefect.Line);
 
-                    if (!alreadyInComments)
+                    bool alreadyExistsOnPr = activeExistingComments.Any(e =>
+                        e.Path.Equals(activeDefect.FilePath, StringComparison.OrdinalIgnoreCase) &&
+                        (e.Id == activeDefect.CommentId || e.Body.Contains(marker)));
+
+                    if (!alreadyInComments && !alreadyExistsOnPr)
                     {
                         inlineComments.Add(new ReviewCommentSubmissionPayload
                         {
@@ -769,202 +784,362 @@ public sealed class GitHubService : IGitHubService
         var highCount = result.HighCount;
         var mediumCount = result.MediumCount;
         var lowCount = result.LowCount;
-        var totalCount = criticalCount + highCount + mediumCount + lowCount;
+        int blockerCount = criticalCount + highCount;
+        bool isBlocked = blockerCount > 0;
 
         var sb = new StringBuilder();
 
         // 1. Hidden marker to identify bot comments for upsert
         sb.AppendLine(BotCommentMarker);
 
-        // 2. Header banner
-        sb.AppendLine("## 🤖 Universal PR Review Bot — Review Dashboard");
-        sb.AppendLine();
-        sb.AppendLine($"> **Pull Request:** `#{context.PullRequestNumber}` — **{context.Title}**  ");
-        sb.AppendLine($"> 👤 **Author:** @{context.Author} &nbsp;•&nbsp; 🌿 **Branches:** `{context.HeadBranch}` ➔ `{context.BaseBranch}` &nbsp;•&nbsp; 📁 **Files Audited:** {context.ChangedFiles.Count}");
-        sb.AppendLine();
-
-        // 3. Verdict Alert Banner (GitHub Flavored Markdown native alert)
-        if (criticalCount > 0)
+        // 2. Status Header & 1-Line Verdict
+        if (isBlocked)
         {
-            sb.AppendLine("> [!CAUTION]");
-            sb.AppendLine($"> ### 🚨 VERDICT: CHANGES REQUIRED ({criticalCount} CRITICAL BLOCKER{(criticalCount > 1 ? "S" : "")})");
-            sb.AppendLine("> Critical security or crash hazards detected. These issues must be resolved before this pull request can be merged.");
+            sb.AppendLine("### ❌ PR Review: Merge Blocked");
+            sb.AppendLine();
+            sb.AppendLine($"{blockerCount} blocking issue{(blockerCount > 1 ? "s" : "")} require attention before this pull request can be merged.");
         }
-        else if (highCount > 0)
+        else if (mediumCount > 0 || lowCount > 0)
         {
-            sb.AppendLine("> [!WARNING]");
-            sb.AppendLine($"> ### 🔴 VERDICT: CHANGES REQUESTED ({highCount} HIGH PRIORITY DEFECT{(highCount > 1 ? "S" : "")})");
-            sb.AppendLine("> Major functional defects or reliability hazards detected. Please resolve the flagged issues before merge.");
-        }
-        else if (mediumCount > 0)
-        {
-            sb.AppendLine("> [!IMPORTANT]");
-            sb.AppendLine($"> ### 🟡 VERDICT: REVIEW RECOMMENDED ({mediumCount} MEDIUM PRIORITY ISSUE{(mediumCount > 1 ? "S" : "")})");
-            sb.AppendLine("> No critical blockers found, but edge-case validations or logic improvements are strongly recommended.");
-        }
-        else if (lowCount > 0)
-        {
-            sb.AppendLine("> [!NOTE]");
-            sb.AppendLine($"> ### 🟢 VERDICT: APPROVED WITH MINOR SUGGESTIONS ({lowCount} SUGGESTION{(lowCount > 1 ? "S" : "")})");
-            sb.AppendLine("> The pull request is safe to merge. Minor optional suggestions are available for code hygiene and modern idioms.");
+            sb.AppendLine("### 🟡 PR Review: Action Recommended");
+            sb.AppendLine();
+            sb.AppendLine($"No blocking issues found. {mediumCount + lowCount} advisory item{(mediumCount + lowCount > 1 ? "s" : "")} available for review.");
         }
         else
         {
-            sb.AppendLine("> [!TIP]");
-            sb.AppendLine("> ### ✨ VERDICT: READY TO MERGE — PERFECT SCORE (100/100)");
-            sb.AppendLine("> All automated security, reliability, and code quality checks have passed with zero defects. Clean PR! 🎉");
+            sb.AppendLine("### ✅ PR Review: Approved to Merge");
+            sb.AppendLine();
+            sb.AppendLine("All automated quality and security checks have passed with zero blockers. Ready to merge! 🎉");
         }
         sb.AppendLine();
-        sb.AppendLine("---");
+
+        // 3. Option A Category Badges: Security · Reliability · Code Quality
+        var allActiveFindings = result.Comments
+            .Concat(result.ActivePriorDefects.Select(d => new ReviewComment
+            {
+                FilePath = d.FilePath,
+                Line = d.Line,
+                Title = d.Title,
+                Severity = d.Severity,
+                AnalyzerName = "Prior Defect",
+                Body = d.OriginalBody
+            })).ToList();
+
+        bool hasSecurityIssue = allActiveFindings.Any(c =>
+            c.Severity >= AnalyzerSeverity.Error && (
+                string.Equals(c.Category, "Security", StringComparison.OrdinalIgnoreCase) ||
+                (c.Title != null && c.Title.Contains("Security", StringComparison.OrdinalIgnoreCase)) ||
+                c.Body.Contains("Security", StringComparison.OrdinalIgnoreCase) ||
+                c.Body.Contains("injection", StringComparison.OrdinalIgnoreCase) ||
+                c.Body.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+                c.Body.Contains("password", StringComparison.OrdinalIgnoreCase)));
+
+        bool hasReliabilityIssue = allActiveFindings.Any(c =>
+            string.Equals(c.Category, "Reliability", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(c.Category, "Input Validation", StringComparison.OrdinalIgnoreCase) ||
+            (c.Title != null && (c.Title.Contains("Null", StringComparison.OrdinalIgnoreCase) ||
+                                 c.Title.Contains("Crash", StringComparison.OrdinalIgnoreCase) ||
+                                 c.Title.Contains("Loop", StringComparison.OrdinalIgnoreCase) ||
+                                 c.Title.Contains("Exception", StringComparison.OrdinalIgnoreCase))) ||
+            (c.Severity >= AnalyzerSeverity.Warning && !hasSecurityIssue));
+
+        bool hasCodeQualityIssue = allActiveFindings.Any(c =>
+            string.Equals(c.Category, "Maintainability", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(c.Category, "Performance", StringComparison.OrdinalIgnoreCase) ||
+            c.Severity == AnalyzerSeverity.Info);
+
+        bool hasCriticalReliability = allActiveFindings.Any(c =>
+            c.Severity >= AnalyzerSeverity.Error && (
+                string.Equals(c.Category, "Reliability", StringComparison.OrdinalIgnoreCase) ||
+                (c.Title != null && (c.Title.Contains("Crash", StringComparison.OrdinalIgnoreCase) ||
+                                     c.Title.Contains("Deadlock", StringComparison.OrdinalIgnoreCase) ||
+                                     c.Title.Contains("Infinite loop", StringComparison.OrdinalIgnoreCase)))));
+
+        string secBadge = hasSecurityIssue ? "❌ Security" : "✅ Security";
+        string relBadge = hasCriticalReliability ? "❌ Reliability" : (hasReliabilityIssue ? "⚠️ Reliability" : "✅ Reliability");
+        string qualBadge = hasCodeQualityIssue ? "⚠️ Code Quality" : "✅ Code Quality";
+
+        sb.AppendLine($"{secBadge} · {relBadge} · {qualBadge}");
         sb.AppendLine();
 
-        // 4. Code Quality & Health Scorecard
-        sb.AppendLine("### 🩺 Code Quality & Health Scorecard");
-        sb.AppendLine();
-        sb.AppendLine("| Metric | Result / Status | Benchmark Visualizer |");
-        sb.AppendLine("| :--- | :---: | :--- |");
-        sb.AppendLine($"| **Code Health Score** | **{result.HealthScore} / 100** | {result.HealthProgressBar} |");
-        sb.AppendLine($"| **Quality Grade** | **Grade {result.HealthGrade}** | 🟢 **A** (90-100) &nbsp; 🟡 **B** (75-89) &nbsp; 🟠 **C** (50-74) &nbsp; 🔴 **F** (<50) |");
-        sb.AppendLine($"| **Defects Flagged** | **{totalCount} Total Issues** | 🚨 **{criticalCount}** Critical &nbsp;•&nbsp; 🔴 **{highCount}** High &nbsp;•&nbsp; 🟡 **{mediumCount}** Medium &nbsp;•&nbsp; 🟢 **{lowCount}** Low |");
-        sb.AppendLine($"| **Quality Gate** | **{(criticalCount == 0 && highCount == 0 ? "PASSED ✅" : "FAILED ❌")}** | {(criticalCount == 0 && highCount == 0 ? "Meets safety criteria for team review" : "Must resolve Critical & High issues to pass")} |");
-        sb.AppendLine();
-
-        // 5. Defect Priority Breakdown Table
-        sb.AppendLine("#### 📊 Defect Classification & Merge Gate");
-        sb.AppendLine();
-        sb.AppendLine("| Status | Severity Level | Impact & Merge Policy | Issues Found |");
-        sb.AppendLine("|:------:|:---------------|:----------------------|:------------:|");
-        sb.AppendLine($"| {(criticalCount > 0 ? "🚨" : "✅")} | 🚨 **Critical** | Exploitable vulnerability, secret leak, or crash | **{criticalCount}** |");
-        sb.AppendLine($"| {(highCount > 0 ? "🔴" : "✅")} | 🔴 **High Priority** | Major logic defect, race condition, data loss risk | **{highCount}** |");
-        sb.AppendLine($"| {(mediumCount > 0 ? "🟡" : "✅")} | 🟡 **Medium Priority** | Missing input validation, boundary condition, error handling | **{mediumCount}** |");
-        sb.AppendLine($"| {(lowCount > 0 ? "🟢" : "✅")} | 🟢 **Low Priority** | Code hygiene, modern idiom, optional suggestion | **{lowCount}** |");
-        sb.AppendLine();
-
-        // 6. AI Executive Summary (if provided by Gemini)
-        if (!string.IsNullOrWhiteSpace(result.SummaryMarkdown))
+        // 4. Priority Sections (Critical/High, Medium, Low)
+        var blockers = allActiveFindings.Where(c => c.Severity >= AnalyzerSeverity.Error).ToList();
+        if (blockers.Count > 0)
         {
-            sb.AppendLine("---");
-            sb.AppendLine();
-            sb.AppendLine("### 🧠 AI Executive Summary (Google Gemini)");
-            sb.AppendLine();
-            sb.AppendLine($"> {result.SummaryMarkdown.Replace("\n", "\n> ")}");
+            sb.AppendLine("🔴 **Action Required (Critical & High Priority)**");
+            foreach (var item in blockers)
+            {
+                var link = BuildFileLink(context, item.FilePath, item.Line, item.StartLine);
+                var title = !string.IsNullOrWhiteSpace(item.Title) ? item.Title : "Critical/High priority defect";
+                sb.AppendLine($"• {title} · {link} ↗");
+            }
             sb.AppendLine();
         }
 
-        // 7. Resolved Defect Reconciliation (if any resolved)
+        var mediumIssues = allActiveFindings.Where(c => c.Severity == AnalyzerSeverity.Warning).ToList();
+        if (mediumIssues.Count > 0)
+        {
+            sb.AppendLine("🟡 **Recommended Improvements (Medium Priority)**");
+            foreach (var item in mediumIssues)
+            {
+                var link = BuildFileLink(context, item.FilePath, item.Line, item.StartLine);
+                var title = !string.IsNullOrWhiteSpace(item.Title) ? item.Title : "Medium priority recommendation";
+                sb.AppendLine($"• {title} · {link} ↗");
+            }
+            sb.AppendLine();
+        }
+
+        var lowIssues = allActiveFindings.Where(c => c.Severity == AnalyzerSeverity.Info).ToList();
+        if (lowIssues.Count > 0)
+        {
+            sb.AppendLine("🟢 **Optional Suggestions (Low Priority)**");
+            foreach (var item in lowIssues)
+            {
+                var link = BuildFileLink(context, item.FilePath, item.Line, item.StartLine);
+                var title = !string.IsNullOrWhiteSpace(item.Title) ? item.Title : "Optional suggestion";
+                sb.AppendLine($"• {title} · {link} ↗");
+            }
+            sb.AppendLine();
+        }
+
+        // 5. Collapsible Verified Fixes Section
         if (result.ResolvedDefects.Count > 0)
         {
-            sb.AppendLine("---");
-            sb.AppendLine();
-            sb.AppendLine($"### ✅ Resolved Issues ({result.ResolvedDefects.Count})");
-            sb.AppendLine();
+            int count = result.ResolvedDefects.Count;
             sb.AppendLine("<details>");
-            sb.AppendLine($"<summary><b>Click to view {result.ResolvedDefects.Count} verified resolved defect{(result.ResolvedDefects.Count > 1 ? "s" : "")}</b></summary>");
+            sb.AppendLine($"<summary><b>✅ {count} verified fix{(count > 1 ? "es" : "")}</b></summary>");
             sb.AppendLine();
+
+            var commitSnippet = !string.IsNullOrWhiteSpace(context.HeadSha) && context.HeadSha.Length >= 7
+                ? context.HeadSha[..7]
+                : context.HeadSha ?? "latest commit";
+
             foreach (var resolved in result.ResolvedDefects)
             {
+                var link = BuildFileLink(context, resolved.FilePath, resolved.Line);
                 var note = !string.IsNullOrWhiteSpace(resolved.ResolutionExplanation)
-                    ? $" — *{resolved.ResolutionExplanation}*"
-                    : "";
-                sb.AppendLine($"- ✅ `{resolved.FilePath}:{resolved.Line}`: {resolved.Title}{note}");
+                    ? $" *(Fixed in `{commitSnippet}`: {resolved.ResolutionExplanation})*"
+                    : $" *(Fixed in `{commitSnippet}`)*";
+                sb.AppendLine($"• {resolved.Title} · {link}{note}");
             }
             sb.AppendLine("</details>");
             sb.AppendLine();
         }
 
-        // 7b. Persistent Unresolved Prior Issues (if any still open)
-        if (result.ActivePriorDefects.Count > 0)
+        // 6. AI Summary if provided
+        if (!string.IsNullOrWhiteSpace(result.SummaryMarkdown))
         {
-            sb.AppendLine("---");
-            sb.AppendLine();
-            sb.AppendLine($"### ⏳ Persistent Open Defects ({result.ActivePriorDefects.Count})");
-            sb.AppendLine();
-            sb.AppendLine("<details open>");
-            sb.AppendLine($"<summary><b>Click to view {result.ActivePriorDefects.Count} issue{(result.ActivePriorDefects.Count > 1 ? "s" : "")} still awaiting resolution</b></summary>");
-            sb.AppendLine();
-            foreach (var active in result.ActivePriorDefects)
-            {
-                sb.AppendLine($"- ⚠️ `{active.FilePath}:{active.Line}`: [{active.Severity}] {active.Title}");
-            }
-            sb.AppendLine("</details>");
+            sb.AppendLine($"> 💡 {result.SummaryMarkdown.Trim().Replace("\n", " ")}");
             sb.AppendLine();
         }
 
-        // 8. Detailed Findings Grouped by Priority
-        if (result.Comments.Count > 0)
-        {
-            sb.AppendLine("---");
-            sb.AppendLine();
-            sb.AppendLine("### 📋 Detailed Findings & Action Items");
-            sb.AppendLine();
-
-            var priorityGroups = result.Comments
-                .GroupBy(c => c.Severity)
-                .OrderByDescending(g => g.Key); // Critical -> High -> Medium -> Low
-
-            foreach (var group in priorityGroups)
-            {
-                var (title, icon, isOpen) = group.Key switch
-                {
-                    AnalyzerSeverity.Critical => ("🚨 Critical Blockers (Immediate Security/Crash Hazards)", "🚨", true),
-                    AnalyzerSeverity.Error => ("🔴 High Priority Issues (Must Resolve Before Merge)", "🔴", true),
-                    AnalyzerSeverity.Warning => ("🟡 Medium Priority Issues (Recommended to Fix)", "⚠️", false),
-                    _ => ("🟢 Low Priority Suggestions (Improvements)", "💡", false)
-                };
-
-                var openAttr = isOpen ? " open" : "";
-                sb.AppendLine($"<details{openAttr}>");
-                sb.AppendLine($"<summary><b>{title} — {group.Count()} issue{(group.Count() > 1 ? "s" : "")}</b></summary>");
-                sb.AppendLine();
-
-                foreach (var comment in group)
-                {
-                    var titleSnippet = !string.IsNullOrWhiteSpace(comment.Title) ? $" — {comment.Title}" : "";
-                    var lineDisplay = (comment.StartLine.HasValue && comment.StartLine.Value < comment.Line)
-                        ? $"Lines {comment.StartLine}-{comment.Line}"
-                        : $"Line {comment.Line}";
-                    sb.AppendLine($"#### {icon} `{comment.FilePath}` ({lineDisplay}){titleSnippet}");
-                    sb.AppendLine();
-                    sb.AppendLine(comment.Body);
-                    sb.AppendLine();
-                    sb.AppendLine("---");
-                }
-
-                sb.AppendLine("</details>");
-                sb.AppendLine();
-            }
-        }
-        else if (result.TotalDefects == 0)
-        {
-            sb.AppendLine("---");
-            sb.AppendLine();
-            sb.AppendLine("### 🎉 All Checks Clear");
-            sb.AppendLine();
-            sb.AppendLine("✨ **No code quality, reliability, or security issues detected in this pull request! Clean PR.** 🎉");
-            sb.AppendLine();
-        }
-
-        // 9. Actionable Next Steps Checklist
+        // 7. Footer & hidden tracking marker
+        var shortSha = !string.IsNullOrWhiteSpace(context.HeadSha) && context.HeadSha.Length >= 7
+            ? context.HeadSha[..7]
+            : context.HeadSha ?? "latest";
         sb.AppendLine("---");
-        sb.AppendLine();
-        sb.AppendLine("### 💡 Developer Next Steps");
-        sb.AppendLine();
-        if (totalCount > 0)
-        {
-            sb.AppendLine("- 🛠️ **Apply Fixes:** Open the **[Files changed]** tab above to review inline comments and apply one-click suggestions.");
-            sb.AppendLine("- 🔄 **Automatic Re-verification:** Push your fix commit to this branch — the bot will re-evaluate modified files and update resolved comments in-place.");
-        }
-        else
-        {
-            sb.AppendLine("- ✅ **Ready for Merge:** All automated checks passed. Proceed to human peer review and merge when ready.");
-        }
-        sb.AppendLine();
-
-        // 9. Footer
-        sb.AppendLine("---");
-        sb.AppendLine("<sub>Reviewed automatically with [Universal PR Bot](https://github.com/marketplace) • Powered by Google Gemini AI & .NET 10</sub>");
+        sb.AppendLine($"<sub>Universal PR Bot · Evaluated commit `{shortSha}`</sub>");
+        sb.AppendLine($"<!-- pr-bot-summary:commit={shortSha}:verdict={(isBlocked ? "FAIL" : "PASS")} -->");
 
         return sb.ToString();
+    }
+
+    private static string BuildFileLink(PullRequestContext context, string filePath, int line, int? startLine = null)
+    {
+        if (startLine.HasValue && startLine.Value < line)
+        {
+            var lineRange = $"Lines {startLine.Value}-{line}";
+            if (!string.IsNullOrWhiteSpace(context.Owner) &&
+                !string.IsNullOrWhiteSpace(context.Repo) &&
+                !string.IsNullOrWhiteSpace(context.HeadSha))
+            {
+                return $"[{filePath}:{startLine.Value}-{line}](https://github.com/{context.Owner}/{context.Repo}/blob/{context.HeadSha}/{filePath}#L{startLine.Value}-L{line}) (`{filePath}` ({lineRange}))";
+            }
+            return $"`{filePath}` ({lineRange})";
+        }
+
+        if (line <= 0) return $"`{filePath}`";
+
+        if (!string.IsNullOrWhiteSpace(context.Owner) &&
+            !string.IsNullOrWhiteSpace(context.Repo) &&
+            !string.IsNullOrWhiteSpace(context.HeadSha))
+        {
+            return $"[{filePath}:{line}](https://github.com/{context.Owner}/{context.Repo}/blob/{context.HeadSha}/{filePath}#L{line})";
+        }
+
+        return $"`{filePath}:{line}`";
+    }
+
+    private async Task ResolveThreadViaGraphQLAsync(
+        string owner,
+        string repo,
+        int prNumber,
+        long commentId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var query = """
+                query ($owner: String!, $repo: String!, $pr: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100) {
+                        nodes {
+                          id
+                          isResolved
+                          comments(first: 10) {
+                            nodes {
+                              databaseId
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+            var endpoint = new Uri("graphql", UriKind.Relative);
+            var queryPayload = new
+            {
+                query,
+                variables = new { owner, repo, pr = prNumber }
+            };
+
+            var response = await _client.Connection.Post<GraphQLReviewThreadQueryResponse>(
+                endpoint,
+                queryPayload,
+                "application/vnd.github+json",
+                "application/json",
+                (IDictionary<string, string>?)null,
+                cancellationToken);
+
+            var threads = response?.Body?.Data?.Repository?.PullRequest?.ReviewThreads?.Nodes;
+            if (threads == null || threads.Count == 0) return;
+
+            var matchingThread = threads.FirstOrDefault(t =>
+                t.Comments?.Nodes?.Any(c => c.DatabaseId == commentId) == true);
+
+            if (matchingThread != null && !matchingThread.IsResolved && !string.IsNullOrWhiteSpace(matchingThread.Id))
+            {
+                var mutation = """
+                    mutation ($threadId: ID!) {
+                      resolveReviewThread(input: {threadId: $threadId}) {
+                        thread {
+                          id
+                          isResolved
+                        }
+                      }
+                    }
+                    """;
+
+                var mutationPayload = new
+                {
+                    query = mutation,
+                    variables = new { threadId = matchingThread.Id }
+                };
+
+                await _client.Connection.Post<object>(
+                    endpoint,
+                    mutationPayload,
+                    "application/vnd.github+json",
+                    "application/json",
+                    (IDictionary<string, string>?)null,
+                    cancellationToken);
+
+                _logger.LogInformation("Successfully resolved GitHub review thread {ThreadId} for comment #{CommentId} via GraphQL.", matchingThread.Id, commentId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not resolve review thread via GraphQL for comment #{CommentId}. (Thread reply was posted via REST).", commentId);
+        }
+    }
+
+    private async Task UnresolveThreadViaGraphQLAsync(
+        string owner,
+        string repo,
+        int prNumber,
+        long commentId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var query = """
+                query ($owner: String!, $repo: String!, $pr: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100) {
+                        nodes {
+                          id
+                          isResolved
+                          comments(first: 10) {
+                            nodes {
+                              databaseId
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+            var endpoint = new Uri("graphql", UriKind.Relative);
+            var queryPayload = new
+            {
+                query,
+                variables = new { owner, repo, pr = prNumber }
+            };
+
+            var response = await _client.Connection.Post<GraphQLReviewThreadQueryResponse>(
+                endpoint,
+                queryPayload,
+                "application/vnd.github+json",
+                "application/json",
+                (IDictionary<string, string>?)null,
+                cancellationToken);
+
+            var threads = response?.Body?.Data?.Repository?.PullRequest?.ReviewThreads?.Nodes;
+            if (threads == null || threads.Count == 0) return;
+
+            var matchingThread = threads.FirstOrDefault(t =>
+                t.Comments?.Nodes?.Any(c => c.DatabaseId == commentId) == true);
+
+            if (matchingThread != null && matchingThread.IsResolved && !string.IsNullOrWhiteSpace(matchingThread.Id))
+            {
+                var mutation = """
+                    mutation ($threadId: ID!) {
+                      unresolveReviewThread(input: {threadId: $threadId}) {
+                        thread {
+                          id
+                          isResolved
+                        }
+                      }
+                    }
+                    """;
+
+                var mutationPayload = new
+                {
+                    query = mutation,
+                    variables = new { threadId = matchingThread.Id }
+                };
+
+                await _client.Connection.Post<object>(
+                    endpoint,
+                    mutationPayload,
+                    "application/vnd.github+json",
+                    "application/json",
+                    (IDictionary<string, string>?)null,
+                    cancellationToken);
+
+                _logger.LogInformation("Successfully un-resolved GitHub review thread {ThreadId} for regressed comment #{CommentId} via GraphQL.", matchingThread.Id, commentId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not unresolve review thread via GraphQL for comment #{CommentId}.", commentId);
+        }
     }
 
     /// <summary>
@@ -1024,4 +1199,46 @@ public sealed class ReviewCommentSubmissionPayload
     public int? StartLine { get; init; }
     public string Side { get; init; } = "RIGHT";
     public string? StartSide { get; init; }
+}
+
+public sealed class GraphQLReviewThreadQueryResponse
+{
+    public GraphQLData? Data { get; set; }
+}
+
+public sealed class GraphQLData
+{
+    public GraphQLRepository? Repository { get; set; }
+}
+
+public sealed class GraphQLRepository
+{
+    public GraphQLPullRequest? PullRequest { get; set; }
+}
+
+public sealed class GraphQLPullRequest
+{
+    public GraphQLReviewThreadsConnection? ReviewThreads { get; set; }
+}
+
+public sealed class GraphQLReviewThreadsConnection
+{
+    public List<GraphQLReviewThreadNode>? Nodes { get; set; }
+}
+
+public sealed class GraphQLReviewThreadNode
+{
+    public string? Id { get; set; }
+    public bool IsResolved { get; set; }
+    public GraphQLCommentsConnection? Comments { get; set; }
+}
+
+public sealed class GraphQLCommentsConnection
+{
+    public List<GraphQLCommentNode>? Nodes { get; set; }
+}
+
+public sealed class GraphQLCommentNode
+{
+    public long DatabaseId { get; set; }
 }

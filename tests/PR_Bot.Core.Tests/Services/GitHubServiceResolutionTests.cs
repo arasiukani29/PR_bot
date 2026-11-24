@@ -23,6 +23,13 @@ public class GitHubServiceResolutionTests
 
         _gitHubClientMock.SetupGet(c => c.Issue).Returns(_issuesClientMock.Object);
         _issuesClientMock.SetupGet(i => i.Comment).Returns(_issueCommentsMock.Object);
+
+        _reviewCommentsMock
+            .Setup(r => r.CreateReply(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<PullRequestReviewCommentReplyCreate>()))
+            .ReturnsAsync(CreateComment(9999, "path", "reply"));
+
+        var connectionMock = new Mock<IConnection>();
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
     }
 
     private static PullRequestReviewComment CreateComment(
@@ -140,6 +147,10 @@ public class GitHubServiceResolutionTests
 
         _reviewCommentsMock.Verify(
             r => r.Edit("test-owner", "test-repo", 1001, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Once);
+
+        _reviewCommentsMock.Verify(
+            r => r.CreateReply("test-owner", "test-repo", 42, It.Is<PullRequestReviewCommentReplyCreate>(c => c.Body.Contains("Verified resolved in commit"))),
             Times.Once);
     }
 
@@ -362,10 +373,10 @@ public class GitHubServiceResolutionTests
             r => r.Edit("test-owner", "test-repo", 1002, It.IsAny<PullRequestReviewCommentEdit>()),
             Times.Never);
 
-        // Comment 1002 (older commit) MUST be deleted so it rolls forward to latest commit
+        // Comment 1002 (active) MUST NOT be deleted so thread history is preserved!
         _reviewCommentsMock.Verify(
             r => r.Delete("test-owner", "test-repo", 1002),
-            Times.Once);
+            Times.Never);
     }
 
     [Fact]
@@ -620,10 +631,10 @@ public class GitHubServiceResolutionTests
     }
 
     [Fact]
-    public async Task ReconcileResolvedCommentsAsync_WhenCommentIsActive_DeletesCommentEvenIfCommitIdMatchesHeadSha()
+    public async Task ReconcileResolvedCommentsAsync_WhenCommentIsActive_PreservesCommentInExistingThread()
     {
         // Real-world GitHub scenario: GitHub updates comment.CommitId to the PR HeadSha.
-        // The old active comment MUST be deleted from the old review thread so it rolls forward cleanly.
+        // The active comment MUST NOT be deleted so thread history and discussions are preserved.
         var context = new PullRequestContext
         {
             Owner = "test-owner",
@@ -693,12 +704,12 @@ public class GitHubServiceResolutionTests
         // Act
         var deletedIds = await service.ReconcileResolvedCommentsAsync(context, new ReviewResult(), hasNewDefects: true);
 
-        // Assert: Comment MUST be deleted from GitHub and returned in deleted set
+        // Assert: Comment MUST NOT be deleted so thread history is preserved
         _reviewCommentsMock.Verify(
             r => r.Delete("test-owner", "test-repo", 999),
-            Times.Once);
+            Times.Never);
 
-        deletedIds.Should().Contain(999);
+        deletedIds.Should().BeEmpty();
     }
 
     [Fact]
@@ -800,11 +811,11 @@ public class GitHubServiceResolutionTests
         result.TotalDefects.Should().Be(0);
         result.HealthScore.Should().Be(100);
 
-        // 2. Review body markdown must show PASSED quality gate with 0 total issues!
+        // 2. Review body markdown must show Approved to Merge with verified fix!
         capturedPayload.Should().NotBeNull();
-        capturedPayload!.Body.Should().Contain("0 Total Issues");
-        capturedPayload.Body.Should().Contain("READY TO MERGE — PERFECT SCORE (100/100)");
-        capturedPayload.Body.Should().Contain("Resolved Issues (1)");
+        capturedPayload!.Body.Should().Contain("PR Review: Approved to Merge");
+        capturedPayload.Body.Should().Contain("verified fix");
+        capturedPayload.Body.Should().NotContain("Code Health Score");
     }
 
     [Fact]
@@ -919,12 +930,165 @@ public class GitHubServiceResolutionTests
         // 2. Defect MUST NOT be listed as resolved!
         result.ResolvedDefects.Should().BeEmpty();
 
-        // 3. Scorecard markdown must flag the defect!
+        // 3. Markdown must flag the defect with Merge Blocked!
         capturedPayload.Should().NotBeNull();
         capturedPayload!.Comments.Should().NotBeNull();
         capturedPayload.Comments.Should().ContainSingle(c => c.Path == "Program.cs" && c.Line == 10);
-        capturedPayload.Body.Should().Contain("1 Total Issues");
-        capturedPayload.Body.Should().Contain("**1** High");
-        capturedPayload.Body.Should().Contain("CHANGES REQUESTED");
+        capturedPayload.Body.Should().Contain("PR Review: Merge Blocked");
+        capturedPayload.Body.Should().Contain("Action Required (Critical & High Priority)");
+        capturedPayload.Body.Should().NotContain("Code Health Score");
+    }
+
+    [Fact]
+    public void BuildReviewMarkdown_WithAllPriorities_RendersOptionABadgesAndPrioritySections()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "Feature PR",
+            Author = "developer",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "abc1234567",
+            ChangedFiles = []
+        };
+
+        var result = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment
+                {
+                    FilePath = "Services/AuthService.cs",
+                    Line = 10,
+                    Title = "SQL injection",
+                    Category = "Security",
+                    Severity = AnalyzerSeverity.Critical,
+                    AnalyzerName = "Gemini AI",
+                    Body = "Vulnerability"
+                },
+                new ReviewComment
+                {
+                    FilePath = "Services/OrderService.cs",
+                    Line = 25,
+                    Title = "Potential Null Reference",
+                    Category = "Reliability",
+                    Severity = AnalyzerSeverity.Warning,
+                    AnalyzerName = "Gemini AI",
+                    Body = "Null check missing"
+                },
+                new ReviewComment
+                {
+                    FilePath = "Helpers/StringHelper.cs",
+                    Line = 40,
+                    Title = "Use pattern matching",
+                    Category = "Maintainability",
+                    Severity = AnalyzerSeverity.Info,
+                    AnalyzerName = "Gemini AI",
+                    Body = "Idiomatic code"
+                }
+            ],
+            ResolvedDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 111,
+                    FilePath = "Models/UserDto.cs",
+                    Line = 5,
+                    Title = "Missing Trim",
+                    OriginalBody = "Add trim",
+                    IsResolved = true,
+                    ResolutionExplanation = "Added Trim() on Title"
+                }
+            ],
+            SummaryMarkdown = "Reviewed auth and order processing logic."
+        };
+
+        // Act
+        var markdown = GitHubService.BuildReviewMarkdown(context, result);
+
+        // Assert
+        markdown.Should().Contain("### ❌ PR Review: Merge Blocked");
+        markdown.Should().Contain("1 blocking issue require attention before this pull request can be merged.");
+        markdown.Should().Contain("❌ Security · ⚠️ Reliability · ⚠️ Code Quality");
+        markdown.Should().Contain("🔴 **Action Required (Critical & High Priority)**");
+        markdown.Should().Contain("SQL injection · [Services/AuthService.cs:10](https://github.com/test-owner/test-repo/blob/abc1234567/Services/AuthService.cs#L10) ↗");
+        markdown.Should().Contain("🟡 **Recommended Improvements (Medium Priority)**");
+        markdown.Should().Contain("Potential Null Reference · [Services/OrderService.cs:25](https://github.com/test-owner/test-repo/blob/abc1234567/Services/OrderService.cs#L25) ↗");
+        markdown.Should().Contain("🟢 **Optional Suggestions (Low Priority)**");
+        markdown.Should().Contain("Use pattern matching · [Helpers/StringHelper.cs:40](https://github.com/test-owner/test-repo/blob/abc1234567/Helpers/StringHelper.cs#L40) ↗");
+        markdown.Should().Contain("<details>");
+        markdown.Should().Contain("<summary><b>✅ 1 verified fix</b></summary>");
+        markdown.Should().Contain("Missing Trim");
+        markdown.Should().Contain("*(Fixed in `abc1234`: Added Trim() on Title)*");
+        markdown.Should().NotContain("Code Health Score");
+        markdown.Should().NotContain("Scorecard");
+    }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenResolved_PostsReplyToThreadAndResolvesGraphQL()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "fedcba9876",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/UserService.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -10,3 +10,4 @@\n- old\n+ fixed"
+                }
+            ]
+        };
+
+        var comment = CreateComment(2001, "Services/UserService.cs", "Bug here\n<!-- pr-bot-finding:file=Services/UserService.cs:line=11 -->");
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([comment]);
+
+        _patchExtractorMock
+            .Setup(p => p.ExtractResolutionDiff(It.IsAny<string>(), 11))
+            .Returns("- old\n+ fixed");
+
+        PullRequestReviewCommentReplyCreate? capturedReply = null;
+        _reviewCommentsMock
+            .Setup(r => r.CreateReply("test-owner", "test-repo", 42, It.IsAny<PullRequestReviewCommentReplyCreate>()))
+            .Callback<string, string, int, PullRequestReviewCommentReplyCreate>((_, _, _, r) => capturedReply = r)
+            .ReturnsAsync(CreateComment(2002, "Services/UserService.cs", "reply"));
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act (result has 0 defects on line 11)
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert: Thread reply was created with resolution diff
+        capturedReply.Should().NotBeNull();
+        capturedReply!.Body.Should().Contain("✅ Verified resolved in commit `fedcba9`.");
+        capturedReply.Body.Should().Contain("<summary>Resolution Diff</summary>");
+        capturedReply.Body.Should().Contain("- old\n+ fixed");
+        capturedReply.Body.Should().Contain(GitHubService.ResolvedMarker);
+
+        // Assert: Comment was NOT deleted
+        _reviewCommentsMock.Verify(
+            r => r.Delete(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>()),
+            Times.Never);
     }
 }

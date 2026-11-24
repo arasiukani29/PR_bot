@@ -659,7 +659,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
     {
         var sb = new StringBuilder();
 
-        // Header line: severity icon + title
+        // Header line: severity icon + label + title
         var (severityLabel, severityIcon) = severity switch
         {
             AnalyzerSeverity.Critical => ("CRITICAL", "🚨"),
@@ -668,30 +668,25 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             _ => ("LOW", "💡")
         };
 
-        if (!string.IsNullOrWhiteSpace(title))
-        {
-            sb.AppendLine($"{severityIcon} **[{severityLabel}]** {title}");
-        }
-        else
-        {
-            sb.AppendLine($"{severityIcon} **[{severityLabel}]** Gemini AI Review");
-        }
-
+        var displayTitle = !string.IsNullOrWhiteSpace(title) ? title : "Issue Identified";
+        sb.AppendLine($"{severityIcon} **[{severityLabel}]** {displayTitle}");
         sb.AppendLine();
 
-        // Category badge
         if (!string.IsNullOrWhiteSpace(category))
         {
             sb.AppendLine($"> Category: `{category}`");
             sb.AppendLine();
         }
 
-        // Problem description
+        // Collapsible Inspection Details block matching Quality Gate format
+        sb.AppendLine("<details open>");
+        sb.AppendLine("<summary>Inspection Details</summary>");
+        sb.AppendLine();
         sb.AppendLine("**Problem:**");
         sb.AppendLine(message);
         sb.AppendLine();
 
-        // Why It Matters
+        // Risk & Impact / Why It Matters
         if (!string.IsNullOrWhiteSpace(whyItMatters))
         {
             sb.AppendLine("**Why It Matters:**");
@@ -699,7 +694,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             sb.AppendLine();
         }
 
-        // GitHub suggestion block (native red/green inline diff) or fallback code block
+        // Recommended Solution / Suggested Fix
         if (!string.IsNullOrWhiteSpace(suggestedFix))
         {
             sb.AppendLine("**Suggested Fix:**");
@@ -717,6 +712,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             }
             sb.AppendLine();
         }
+
+        sb.AppendLine("</details>");
 
         return sb.ToString().TrimEnd();
     }

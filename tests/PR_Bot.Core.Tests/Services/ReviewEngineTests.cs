@@ -160,15 +160,12 @@ public class ReviewEngineTests
 
         // Assertions for UI elements
         markdown.Should().Contain(GitHubService.BotCommentMarker);
-        markdown.Should().Contain("## 🤖 Universal PR Review Bot — Review Dashboard");
-        markdown.Should().Contain("> [!CAUTION]");
-        markdown.Should().Contain("### 🚨 VERDICT: CHANGES REQUIRED");
-        markdown.Should().Contain("### 🩺 Code Quality & Health Scorecard");
-        markdown.Should().NotContain("### 📁 Audited Files Matrix");
-        markdown.Should().Contain("### 🧠 AI Executive Summary (Google Gemini)");
+        markdown.Should().Contain("### ❌ PR Review: Merge Blocked");
+        markdown.Should().Contain("1 blocking issue require attention before this pull request can be merged.");
+        markdown.Should().Contain("❌ Security");
+        markdown.Should().Contain("🔴 **Action Required (Critical & High Priority)**");
         markdown.Should().Contain("Executive summary of changes.");
-        markdown.Should().Contain("<details open>");
-        markdown.Should().Contain("### 💡 Developer Next Steps");
+        markdown.Should().NotContain("Health Scorecard");
     }
 
     [Fact]
@@ -201,12 +198,10 @@ public class ReviewEngineTests
 
         var markdown = GitHubService.BuildReviewMarkdown(context, result);
 
-        markdown.Should().Contain("> [!TIP]");
-        markdown.Should().Contain("### ✨ VERDICT: READY TO MERGE — PERFECT SCORE (100/100)");
-        markdown.Should().Contain("PASSED ✅");
-        markdown.Should().NotContain("### 📁 Audited Files Matrix");
-        markdown.Should().Contain("✨ **No code quality, reliability, or security issues detected");
-        markdown.Should().Contain("🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩 &nbsp; **100%**");
+        markdown.Should().Contain("### ✅ PR Review: Approved to Merge");
+        markdown.Should().Contain("All automated quality and security checks have passed with zero blockers. Ready to merge! 🎉");
+        markdown.Should().Contain("✅ Security · ✅ Reliability · ✅ Code Quality");
+        markdown.Should().NotContain("Health Score");
     }
 
     [Fact]
