@@ -392,20 +392,31 @@ public sealed class GitHubService : IGitHubService
                     "Comment #{CommentId} on {Path}:{Line} detected as RESOLVED. Updating comment in-place...",
                     comment.Id, comment.Path, commentLine);
 
+                // Fetch commit patch for HeadSha to get exact lines added (+) and deleted (-) for the fix
+                string? patchToUse = null;
+                if (!string.IsNullOrWhiteSpace(context.HeadSha) &&
+                    !string.Equals(context.HeadSha, "HEAD", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var commit = await _client.Repository.Commit.Get(context.Owner, context.Repo, context.HeadSha);
+                        var commitFile = commit.Files?.FirstOrDefault(f =>
+                            f.Filename.Equals(comment.Path, StringComparison.OrdinalIgnoreCase));
+                        if (!string.IsNullOrWhiteSpace(commitFile?.Patch))
+                        {
+                            patchToUse = commitFile.Patch;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not fetch commit patch for {HeadSha} on {Path}. Falling back to PR file patch.", context.HeadSha, comment.Path);
+                    }
+                }
+
+                patchToUse ??= changedFile?.Patch;
+
                 // Extract the diff of code added/modified that resolved this issue
-                var diffSnippet = _patchExtractor.ExtractResolutionDiff(changedFile?.Patch, commentLine);
-
-                // Avoid displaying the entire file creation patch if the file was newly added (@@ -0,0)
-                bool isBrandNewFilePatch = !string.IsNullOrWhiteSpace(changedFile?.Patch) && changedFile.Patch.Contains("-0,0");
-
-                string codeSection = !string.IsNullOrWhiteSpace(diffSnippet) && !isBrandNewFilePatch
-                    ? $"""
-                      **Code changes applied to resolve:**
-                      ```diff
-                      {diffSnippet}
-                      ```
-                      """
-                    : "*Fix verified by automated review.*";
+                var diffSnippet = _patchExtractor.ExtractResolutionDiff(patchToUse, commentLine);
 
                 var commitSnippet = !string.IsNullOrWhiteSpace(context.HeadSha) && context.HeadSha.Length >= 7
                     ? context.HeadSha[..7]
@@ -415,24 +426,10 @@ public sealed class GitHubService : IGitHubService
                     ? $"\n> 💡 **AI Verification:** {priorMatch.ResolutionExplanation}\n"
                     : "";
 
-                // 1. Edit the parent comment so it clearly shows [RESOLVED]
-                string updatedBody = $"""
-                    ### ✅ [RESOLVED] Issue Fixed in `{commitSnippet}`
-                    {explanationBlock}
-                    **Code changes applied to resolve:**
-                    ```diff
-                    {codeSection}
-                    ```
-
-                    ---
-                    <details>
-                    <summary>Original Finding</summary>
-
-                    {comment.Body}
-                    </details>
-
-                    {ResolvedMarker}
-                    """;
+                // 1. Edit the parent comment header to indicate [RESOLVED] while keeping original finding details intact
+                string updatedBody = comment.Body.Contains("[RESOLVED]")
+                    ? comment.Body
+                    : $"### ✅ [RESOLVED]\n\n{comment.Body}\n\n{ResolvedMarker}";
 
                 try
                 {
@@ -454,20 +451,35 @@ public sealed class GitHubService : IGitHubService
                     _logger.LogWarning(ex, "Failed to edit review comment #{CommentId} on {Path}.", comment.Id, comment.Path);
                 }
 
-                // 2. Post thread reply preserving complete conversation history
-                string replyBody = $"""
-                    ✅ Verified resolved in commit `{commitSnippet}`.
-                    {explanationBlock}
-                    <details open>
-                    <summary>Resolution Diff</summary>
+                // 2. Post thread reply formatted as requested:
+                //    ✅ Resolved in `01f4c11`.
+                //    <details open>
+                //    <summary>Changes that fixed it</summary>
+                //    ```diff
+                //    ...
+                //    ```
+                //    </details>
+                string replyBody = !string.IsNullOrWhiteSpace(diffSnippet)
+                    ? $"""
+                      ✅ Resolved in `{commitSnippet}`.
+                      {explanationBlock}
+                      <details open>
+                      <summary>Changes that fixed it</summary>
 
-                    ```diff
-                    {codeSection}
-                    ```
-                    </details>
+                      ```diff
+                      {diffSnippet}
+                      ```
+                      </details>
 
-                    {ResolvedMarker}
-                    """;
+                      {ResolvedMarker}
+                      """
+                    : $"""
+                      ✅ Resolved in `{commitSnippet}`.
+                      {explanationBlock}
+                      *Fix verified by automated review.*
+
+                      {ResolvedMarker}
+                      """;
 
                 try
                 {
@@ -974,11 +986,12 @@ public sealed class GitHubService : IGitHubService
         return $"`{filePath}:{line}`";
     }
 
-    private async Task ResolveThreadViaGraphQLAsync(
+    private async Task<string?> FindGraphQLThreadIdAsync(
         string owner,
         string repo,
         int prNumber,
         long commentId,
+        bool? requiredResolvedState,
         CancellationToken cancellationToken)
     {
         try
@@ -991,7 +1004,7 @@ public sealed class GitHubService : IGitHubService
                         nodes {
                           id
                           isResolved
-                          comments(first: 10) {
+                          comments(first: 100) {
                             nodes {
                               databaseId
                             }
@@ -1010,7 +1023,7 @@ public sealed class GitHubService : IGitHubService
                 variables = new { owner, repo, pr = prNumber }
             };
 
-            var response = await _client.Connection.Post<GraphQLReviewThreadQueryResponse>(
+            var response = await _client.Connection.Post<object>(
                 endpoint,
                 queryPayload,
                 "application/vnd.github+json",
@@ -1018,45 +1031,116 @@ public sealed class GitHubService : IGitHubService
                 (IDictionary<string, string>?)null,
                 cancellationToken);
 
-            var threads = response?.Body?.Data?.Repository?.PullRequest?.ReviewThreads?.Nodes;
-            if (threads == null || threads.Count == 0) return;
-
-            var matchingThread = threads.FirstOrDefault(t =>
-                t.Comments?.Nodes?.Any(c => c.DatabaseId == commentId) == true);
-
-            if (matchingThread != null && !matchingThread.IsResolved && !string.IsNullOrWhiteSpace(matchingThread.Id))
+            string? rawJson = response?.HttpResponse?.Body?.ToString();
+            if (string.IsNullOrWhiteSpace(rawJson) && response?.Body != null)
             {
-                var mutation = """
-                    mutation ($threadId: ID!) {
-                      resolveReviewThread(input: {threadId: $threadId}) {
-                        thread {
-                          id
-                          isResolved
-                        }
-                      }
-                    }
-                    """;
+                rawJson = System.Text.Json.JsonSerializer.Serialize(response.Body);
+            }
 
-                var mutationPayload = new
+            if (string.IsNullOrWhiteSpace(rawJson))
+            {
+                return null;
+            }
+
+            using var doc = System.Text.Json.JsonDocument.Parse(rawJson);
+            if (doc.RootElement.TryGetProperty("errors", out var errors))
+            {
+                _logger.LogWarning("GitHub GraphQL query returned errors: {Errors}", errors.ToString());
+                return null;
+            }
+
+            if (!doc.RootElement.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("repository", out var repoElem) ||
+                !repoElem.TryGetProperty("pullRequest", out var prElem) ||
+                !prElem.TryGetProperty("reviewThreads", out var reviewThreads) ||
+                !reviewThreads.TryGetProperty("nodes", out var threadNodes))
+            {
+                return null;
+            }
+
+            foreach (var thread in threadNodes.EnumerateArray())
+            {
+                if (requiredResolvedState.HasValue)
                 {
-                    query = mutation,
-                    variables = new { threadId = matchingThread.Id }
-                };
+                    bool isRes = thread.TryGetProperty("isResolved", out var isResProp) && isResProp.GetBoolean();
+                    if (isRes != requiredResolvedState.Value)
+                    {
+                        continue;
+                    }
+                }
 
-                await _client.Connection.Post<object>(
-                    endpoint,
-                    mutationPayload,
-                    "application/vnd.github+json",
-                    "application/json",
-                    (IDictionary<string, string>?)null,
-                    cancellationToken);
+                if (!thread.TryGetProperty("id", out var idProp))
+                {
+                    continue;
+                }
 
-                _logger.LogInformation("Successfully resolved GitHub review thread {ThreadId} for comment #{CommentId} via GraphQL.", matchingThread.Id, commentId);
+                if (thread.TryGetProperty("comments", out var commentsElem) &&
+                    commentsElem.TryGetProperty("nodes", out var commentNodes))
+                {
+                    foreach (var c in commentNodes.EnumerateArray())
+                    {
+                        if (c.TryGetProperty("databaseId", out var dbId) && dbId.GetInt64() == commentId)
+                        {
+                            return idProp.GetString();
+                        }
+                    }
+                }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Could not resolve review thread via GraphQL for comment #{CommentId}. (Thread reply was posted via REST).", commentId);
+            _logger.LogDebug(ex, "Failed to query GraphQL review threads for comment #{CommentId}.", commentId);
+        }
+
+        return null;
+    }
+
+    private async Task ResolveThreadViaGraphQLAsync(
+        string owner,
+        string repo,
+        int prNumber,
+        long commentId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var threadId = await FindGraphQLThreadIdAsync(owner, repo, prNumber, commentId, requiredResolvedState: false, cancellationToken);
+            if (string.IsNullOrWhiteSpace(threadId))
+            {
+                return;
+            }
+
+            var mutation = """
+                mutation ($threadId: ID!) {
+                  resolveReviewThread(input: {threadId: $threadId}) {
+                    thread {
+                      id
+                      isResolved
+                    }
+                  }
+                }
+                """;
+
+            var endpoint = new Uri("graphql", UriKind.Relative);
+            var mutationPayload = new
+            {
+                query = mutation,
+                variables = new { threadId }
+            };
+
+            await _client.Connection.Post<object>(
+                endpoint,
+                mutationPayload,
+                "application/vnd.github+json",
+                "application/json",
+                (IDictionary<string, string>?)null,
+                cancellationToken);
+
+            _logger.LogInformation("Successfully resolved GitHub review thread {ThreadId} for comment #{CommentId} via GraphQL.", threadId, commentId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not resolve review thread via GraphQL for comment #{CommentId}. (Thread reply was posted via REST).", commentId);
         }
     }
 
@@ -1069,80 +1153,43 @@ public sealed class GitHubService : IGitHubService
     {
         try
         {
-            var query = """
-                query ($owner: String!, $repo: String!, $pr: Int!) {
-                  repository(owner: $owner, name: $repo) {
-                    pullRequest(number: $pr) {
-                      reviewThreads(first: 100) {
-                        nodes {
-                          id
-                          isResolved
-                          comments(first: 10) {
-                            nodes {
-                              databaseId
-                            }
-                          }
-                        }
-                      }
+            var threadId = await FindGraphQLThreadIdAsync(owner, repo, prNumber, commentId, requiredResolvedState: true, cancellationToken);
+            if (string.IsNullOrWhiteSpace(threadId))
+            {
+                return;
+            }
+
+            var mutation = """
+                mutation ($threadId: ID!) {
+                  unresolveReviewThread(input: {threadId: $threadId}) {
+                    thread {
+                      id
+                      isResolved
                     }
                   }
                 }
                 """;
 
             var endpoint = new Uri("graphql", UriKind.Relative);
-            var queryPayload = new
+            var mutationPayload = new
             {
-                query,
-                variables = new { owner, repo, pr = prNumber }
+                query = mutation,
+                variables = new { threadId }
             };
 
-            var response = await _client.Connection.Post<GraphQLReviewThreadQueryResponse>(
+            await _client.Connection.Post<object>(
                 endpoint,
-                queryPayload,
+                mutationPayload,
                 "application/vnd.github+json",
                 "application/json",
                 (IDictionary<string, string>?)null,
                 cancellationToken);
 
-            var threads = response?.Body?.Data?.Repository?.PullRequest?.ReviewThreads?.Nodes;
-            if (threads == null || threads.Count == 0) return;
-
-            var matchingThread = threads.FirstOrDefault(t =>
-                t.Comments?.Nodes?.Any(c => c.DatabaseId == commentId) == true);
-
-            if (matchingThread != null && matchingThread.IsResolved && !string.IsNullOrWhiteSpace(matchingThread.Id))
-            {
-                var mutation = """
-                    mutation ($threadId: ID!) {
-                      unresolveReviewThread(input: {threadId: $threadId}) {
-                        thread {
-                          id
-                          isResolved
-                        }
-                      }
-                    }
-                    """;
-
-                var mutationPayload = new
-                {
-                    query = mutation,
-                    variables = new { threadId = matchingThread.Id }
-                };
-
-                await _client.Connection.Post<object>(
-                    endpoint,
-                    mutationPayload,
-                    "application/vnd.github+json",
-                    "application/json",
-                    (IDictionary<string, string>?)null,
-                    cancellationToken);
-
-                _logger.LogInformation("Successfully un-resolved GitHub review thread {ThreadId} for regressed comment #{CommentId} via GraphQL.", matchingThread.Id, commentId);
-            }
+            _logger.LogInformation("Successfully un-resolved GitHub review thread {ThreadId} for regressed comment #{CommentId} via GraphQL.", threadId, commentId);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Could not unresolve review thread via GraphQL for comment #{CommentId}.", commentId);
+            _logger.LogWarning(ex, "Could not unresolve review thread via GraphQL for comment #{CommentId}.", commentId);
         }
     }
 
@@ -1203,46 +1250,4 @@ public sealed class ReviewCommentSubmissionPayload
     public int? StartLine { get; init; }
     public string Side { get; init; } = "RIGHT";
     public string? StartSide { get; init; }
-}
-
-public sealed class GraphQLReviewThreadQueryResponse
-{
-    public GraphQLData? Data { get; set; }
-}
-
-public sealed class GraphQLData
-{
-    public GraphQLRepository? Repository { get; set; }
-}
-
-public sealed class GraphQLRepository
-{
-    public GraphQLPullRequest? PullRequest { get; set; }
-}
-
-public sealed class GraphQLPullRequest
-{
-    public GraphQLReviewThreadsConnection? ReviewThreads { get; set; }
-}
-
-public sealed class GraphQLReviewThreadsConnection
-{
-    public List<GraphQLReviewThreadNode>? Nodes { get; set; }
-}
-
-public sealed class GraphQLReviewThreadNode
-{
-    public string? Id { get; set; }
-    public bool IsResolved { get; set; }
-    public GraphQLCommentsConnection? Comments { get; set; }
-}
-
-public sealed class GraphQLCommentsConnection
-{
-    public List<GraphQLCommentNode>? Nodes { get; set; }
-}
-
-public sealed class GraphQLCommentNode
-{
-    public long DatabaseId { get; set; }
 }

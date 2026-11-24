@@ -142,10 +142,7 @@ public class GitHubServiceResolutionTests
 
         // Assert
         capturedEdit.Should().NotBeNull();
-        capturedEdit!.Body.Should().Contain("### ✅ [RESOLVED] Issue Fixed in `1234567`");
-        capturedEdit.Body.Should().Contain("+ fixed_code;");
-        capturedEdit.Body.Should().Contain("+ extra_check;");
-        capturedEdit.Body.Should().Contain("<details>");
+        capturedEdit!.Body.Should().Contain("### ✅ [RESOLVED]");
         capturedEdit.Body.Should().Contain("SQL injection vulnerability.");
         capturedEdit.Body.Should().Contain("<!-- pr-bot-resolved -->");
 
@@ -154,7 +151,10 @@ public class GitHubServiceResolutionTests
             Times.Once);
 
         _reviewCommentsMock.Verify(
-            r => r.CreateReply("test-owner", "test-repo", 42, It.Is<PullRequestReviewCommentReplyCreate>(c => c.Body.Contains("Verified resolved in commit"))),
+            r => r.CreateReply("test-owner", "test-repo", 42, It.Is<PullRequestReviewCommentReplyCreate>(c =>
+                c.Body.Contains("✅ Resolved in `1234567`") &&
+                c.Body.Contains("<summary>Changes that fixed it</summary>") &&
+                c.Body.Contains("+ fixed_code;"))),
             Times.Once);
     }
 
@@ -1147,8 +1147,8 @@ public class GitHubServiceResolutionTests
 
         // Assert: Thread reply was created with resolution diff
         capturedReply.Should().NotBeNull();
-        capturedReply!.Body.Should().Contain("✅ Verified resolved in commit `fedcba9`.");
-        capturedReply.Body.Should().Contain("<summary>Resolution Diff</summary>");
+        capturedReply!.Body.Should().Contain("✅ Resolved in `fedcba9`.");
+        capturedReply.Body.Should().Contain("<summary>Changes that fixed it</summary>");
         capturedReply.Body.Should().Contain("- old\n+ fixed");
         capturedReply.Body.Should().Contain(GitHubService.ResolvedMarker);
 
@@ -1156,5 +1156,115 @@ public class GitHubServiceResolutionTests
         _reviewCommentsMock.Verify(
             r => r.Delete(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>()),
             Times.Never);
+    }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_ResolvesReviewThreadViaGraphQL()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "fedcba9876543210",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/UserService.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -10,3 +10,4 @@\n- old\n+ fixed"
+                }
+            ]
+        };
+
+        var comment = CreateComment(3001, "Services/UserService.cs", "Bug here\n<!-- pr-bot-finding:file=Services/UserService.cs:line=11 -->");
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([comment]);
+
+        _patchExtractorMock
+            .Setup(p => p.ExtractResolutionDiff(It.IsAny<string>(), 11))
+            .Returns("- old\n+ fixed");
+
+        var connectionMock = new Mock<IConnection>();
+        var queryResponseJson = """
+        {
+          "data": {
+            "repository": {
+              "pullRequest": {
+                "reviewThreads": {
+                  "nodes": [
+                    {
+                      "id": "PRRT_test123",
+                      "isResolved": false,
+                      "comments": {
+                        "nodes": [
+                          {
+                            "databaseId": 3001
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+        """;
+
+        var queryApiResponseMock = new Mock<IApiResponse<object>>();
+        var queryHttpResponseMock = new Mock<IResponse>();
+        queryHttpResponseMock.SetupGet(h => h.Body).Returns(queryResponseJson);
+        queryApiResponseMock.SetupGet(a => a.HttpResponse).Returns(queryHttpResponseMock.Object);
+
+        var mutationApiResponseMock = new Mock<IApiResponse<object>>();
+
+        object? capturedMutationPayload = null;
+
+        connectionMock
+            .Setup(c => c.Post<object>(
+                It.Is<Uri>(u => u.OriginalString == "graphql"),
+                It.Is<object>(o => o.ToString()!.Contains("reviewThreads")),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(queryApiResponseMock.Object);
+
+        connectionMock
+            .Setup(c => c.Post<object>(
+                It.Is<Uri>(u => u.OriginalString == "graphql"),
+                It.Is<object>(o => o.ToString()!.Contains("resolveReviewThread")),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>(
+                (_, payload, _, _, _, _) => capturedMutationPayload = payload)
+            .ReturnsAsync(mutationApiResponseMock.Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert: GraphQL mutation was executed with PRRT_test123
+        capturedMutationPayload.Should().NotBeNull();
+        capturedMutationPayload.ToString().Should().Contain("PRRT_test123");
     }
 }

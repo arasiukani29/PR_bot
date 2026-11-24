@@ -56,15 +56,19 @@ public sealed class PatchResolutionExtractor : IPatchResolutionExtractor
             return null;
         }
 
-        // 2. Format the hunk lines, emphasizing added (+) and removed (-) changes
+        // 2. Format the hunk lines, ensuring hunk header and changed lines around targetLine are included
         var sb = new StringBuilder();
-        var hunkLines = matchedHunk.Lines;
-
-        // Take up to 20 lines of the relevant hunk to keep the comment readable
         int maxLinesToInclude = 20;
-        var displayLines = hunkLines.Count <= maxLinesToInclude
-            ? hunkLines
+
+        var displayLines = matchedHunk.Lines.Count <= maxLinesToInclude
+            ? matchedHunk.Lines.Select(l => l.Text).ToList()
             : SelectRelevantHunkLines(matchedHunk, targetLine, maxLinesToInclude);
+
+        // Always prepend hunk header if not already present in displayLines
+        if (displayLines.Count > 0 && !displayLines[0].StartsWith("@@"))
+        {
+            sb.AppendLine(matchedHunk.Header);
+        }
 
         foreach (var l in displayLines)
         {
@@ -100,7 +104,7 @@ public sealed class PatchResolutionExtractor : IPatchResolutionExtractor
                     StartLine = startLine,
                     EndLine = startLine
                 };
-                currentHunk.Lines.Add(line);
+                currentHunk.Lines.Add((line, startLine));
                 continue;
             }
 
@@ -109,15 +113,22 @@ public sealed class PatchResolutionExtractor : IPatchResolutionExtractor
                 continue;
             }
 
-            currentHunk.Lines.Add(line);
-
             if (line.StartsWith('+') && !line.StartsWith("+++"))
             {
+                currentHunk.Lines.Add((line, currentLine));
                 currentLine++;
             }
-            else if (line.StartsWith(' '))
+            else if (line.StartsWith('-') && !line.StartsWith("---"))
             {
-                currentLine++;
+                currentHunk.Lines.Add((line, currentLine));
+            }
+            else
+            {
+                currentHunk.Lines.Add((line, currentLine));
+                if (line.StartsWith(' '))
+                {
+                    currentLine++;
+                }
             }
         }
 
@@ -132,18 +143,60 @@ public sealed class PatchResolutionExtractor : IPatchResolutionExtractor
 
     private static List<string> SelectRelevantHunkLines(HunkData hunk, int targetLine, int maxLines)
     {
-        // Prioritize lines with changes (+ or -) and immediate context
-        int changeIndex = hunk.Lines.FindIndex(l => l.StartsWith('+') || l.StartsWith('-'));
-        if (changeIndex < 0)
+        // 1. Find the changed line (+ or -) closest to targetLine
+        int targetIndex = -1;
+        int minDistance = int.MaxValue;
+
+        for (int i = 0; i < hunk.Lines.Count; i++)
         {
-            changeIndex = 0;
+            var (text, lineNum) = hunk.Lines[i];
+            if (text.StartsWith('+') || text.StartsWith('-'))
+            {
+                int dist = Math.Abs(lineNum - targetLine);
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    targetIndex = i;
+                }
+            }
         }
 
-        int half = maxLines / 2;
-        int start = Math.Max(0, changeIndex - half);
-        int count = Math.Min(maxLines, hunk.Lines.Count - start);
+        // 2. If no changed line was found, pick line closest to targetLine
+        if (targetIndex < 0)
+        {
+            for (int i = 0; i < hunk.Lines.Count; i++)
+            {
+                var (_, lineNum) = hunk.Lines[i];
+                int dist = Math.Abs(lineNum - targetLine);
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    targetIndex = i;
+                }
+            }
+        }
 
-        return hunk.Lines.GetRange(start, count);
+        if (targetIndex < 0)
+        {
+            targetIndex = 0;
+        }
+
+        // Leave 1 slot for header if needed
+        int contentSlots = maxLines - 1;
+        int half = contentSlots / 2;
+        int start = Math.Max(1, targetIndex - half); // skip index 0 which is header
+        int count = Math.Min(contentSlots, hunk.Lines.Count - start);
+
+        var result = new List<string> { hunk.Header };
+        for (int i = start; i < start + count; i++)
+        {
+            if (i < hunk.Lines.Count && hunk.Lines[i].Text != hunk.Header)
+            {
+                result.Add(hunk.Lines[i].Text);
+            }
+        }
+
+        return result;
     }
 
     private sealed class HunkData
@@ -151,6 +204,6 @@ public sealed class PatchResolutionExtractor : IPatchResolutionExtractor
         public string Header { get; set; } = string.Empty;
         public int StartLine { get; set; }
         public int EndLine { get; set; }
-        public List<string> Lines { get; } = new();
+        public List<(string Text, int LineNumber)> Lines { get; } = new();
     }
 }
