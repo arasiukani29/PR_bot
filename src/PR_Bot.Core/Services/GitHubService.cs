@@ -643,24 +643,19 @@ public sealed class GitHubService : IGitHubService
                  string.Equals(latestBotReview.State.StringValue, "COMMENTED", StringComparison.OrdinalIgnoreCase)
         };
 
-        // If the review state is unchanged and there are no new inline comments, update the review body in-place!
+        // If the review state is unchanged and there are no new inline comments, do not submit a duplicate review!
         if (latestBotReview != null && stateMatches && inlineComments.Count == 0)
         {
-            _logger.LogInformation("Review status unchanged ({Event}) and no new inline comments. Updating existing review #{ReviewId} body in-place...", reviewEventStr, latestBotReview.Id);
-            try
-            {
-                var updateEndpoint = new Uri($"repos/{context.Owner}/{context.Repo}/pulls/{context.PullRequestNumber}/reviews/{latestBotReview.Id}", UriKind.Relative);
-                await _client.Connection.Put<PullRequestReview>(
-                    updateEndpoint,
-                    new { body = summaryMarkdown });
-                _logger.LogInformation("Successfully updated existing review #{ReviewId} body in-place.", latestBotReview.Id);
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Could not update review body in-place. Submitting new review event.");
-            }
+            _logger.LogInformation("Review status unchanged ({Event}) and no new inline comments. Overall summary updated in-place.", reviewEventStr);
+            return;
         }
+
+        string reviewBody = reviewEvent switch
+        {
+            PullRequestReviewEvent.RequestChanges => "Changes requested based on automated review findings. Please see inline comments and the overall summary above.",
+            PullRequestReviewEvent.Approve => "Approved based on automated review findings. All blockers resolved.",
+            _ => "Automated code review completed. Please see inline comments and the overall summary above."
+        };
 
         _logger.LogInformation(
             "Submitting review to PR #{PrNumber} with event {Event} and {Count} inline comment(s)...",
@@ -672,7 +667,7 @@ public sealed class GitHubService : IGitHubService
             {
                 CommitId = context.HeadSha,
                 Event = reviewEventStr,
-                Body = summaryMarkdown,
+                Body = reviewBody,
                 Comments = inlineComments.Count > 0 ? inlineComments : null
             };
 
@@ -734,29 +729,38 @@ public sealed class GitHubService : IGitHubService
     {
         try
         {
-            // If an older version of the bot previously created an issue comment, update it in-place so it's not stale.
             var existingComments = await _client.Issue.Comment.GetAllForIssue(
                 context.Owner,
                 context.Repo,
                 context.PullRequestNumber);
 
-            var previousBotComment = existingComments.FirstOrDefault(c =>
+            var previousBotComment = existingComments?.FirstOrDefault(c =>
                 c.Body != null && c.Body.Contains(BotCommentMarker));
 
             if (previousBotComment != null)
             {
-                _logger.LogInformation("Updating legacy PR review comment ID {Id}...", previousBotComment.Id);
+                _logger.LogInformation("Updating overall PR review comment ID {Id} in-place...", previousBotComment.Id);
                 await _client.Issue.Comment.Update(
                     context.Owner,
                     context.Repo,
                     previousBotComment.Id,
                     summaryMarkdown);
-                _logger.LogInformation("Updated legacy review comment.");
+                _logger.LogInformation("Updated overall review comment in-place.");
+            }
+            else
+            {
+                _logger.LogInformation("Creating single overall PR review comment for PR #{PrNumber}...", context.PullRequestNumber);
+                await _client.Issue.Comment.Create(
+                    context.Owner,
+                    context.Repo,
+                    context.PullRequestNumber,
+                    summaryMarkdown);
+                _logger.LogInformation("Created single overall review comment.");
             }
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Could not update legacy summary comment on PR #{PrNumber}", context.PullRequestNumber);
+            _logger.LogWarning(ex, "Could not upsert overall summary comment on PR #{PrNumber}", context.PullRequestNumber);
         }
     }
 

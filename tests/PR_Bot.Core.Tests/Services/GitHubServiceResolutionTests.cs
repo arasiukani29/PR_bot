@@ -24,6 +24,10 @@ public class GitHubServiceResolutionTests
         _gitHubClientMock.SetupGet(c => c.Issue).Returns(_issuesClientMock.Object);
         _issuesClientMock.SetupGet(i => i.Comment).Returns(_issueCommentsMock.Object);
 
+        _issueCommentsMock
+            .Setup(i => i.GetAllForIssue(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))
+            .ReturnsAsync(new List<IssueComment>());
+
         _reviewCommentsMock
             .Setup(r => r.CreateReply(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<PullRequestReviewCommentReplyCreate>()))
             .ReturnsAsync(CreateComment(9999, "path", "reply"));
@@ -439,6 +443,56 @@ public class GitHubServiceResolutionTests
     }
 
     [Fact]
+    public async Task PostReviewAsync_WhenNoSummaryCommentExists_CreatesSingleOverallComment()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "1234567890abcdef",
+            ChangedFiles = []
+        };
+
+        _issueCommentsMock
+            .Setup(i => i.GetAllForIssue("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<IssueComment>());
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReviewComment>());
+
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReview>());
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        var result = new ReviewResult();
+
+        // Act
+        await service.PostReviewAsync(context, result);
+
+        // Assert: Should CREATE the single overall comment
+        _issueCommentsMock.Verify(
+            i => i.Create("test-owner", "test-repo", 42, It.Is<string>(b => b.Contains(GitHubService.BotCommentMarker))),
+            Times.Once);
+
+        _issueCommentsMock.Verify(
+            i => i.Update(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<string>()),
+            Times.Never);
+    }
+
+    [Fact]
     public async Task PostReviewAsync_WhenPreviouslyResolvedDefectReintroduced_ReportsAsNewRegression()
     {
         // Arrange
@@ -811,11 +865,17 @@ public class GitHubServiceResolutionTests
         result.TotalDefects.Should().Be(0);
         result.HealthScore.Should().Be(100);
 
-        // 2. Review body markdown must show Approved to Merge with verified fix!
+        // 2. The single overall comment must show Approved to Merge with verified fix!
+        _issueCommentsMock.Verify(
+            i => i.Create("test-owner", "test-repo", 42, It.Is<string>(b =>
+                b.Contains("PR Review: Approved to Merge") &&
+                b.Contains("verified fix") &&
+                !b.Contains("Code Health Score"))),
+            Times.Once);
+
+        // 3. Review submission body must be concise without duplicating the full dashboard
         capturedPayload.Should().NotBeNull();
-        capturedPayload!.Body.Should().Contain("PR Review: Approved to Merge");
-        capturedPayload.Body.Should().Contain("verified fix");
-        capturedPayload.Body.Should().NotContain("Code Health Score");
+        capturedPayload!.Body.Should().Contain("Approved based on automated review findings");
     }
 
     [Fact]
@@ -930,13 +990,19 @@ public class GitHubServiceResolutionTests
         // 2. Defect MUST NOT be listed as resolved!
         result.ResolvedDefects.Should().BeEmpty();
 
-        // 3. Markdown must flag the defect with Merge Blocked!
+        // 3. The single overall comment must flag the defect with Merge Blocked!
+        _issueCommentsMock.Verify(
+            i => i.Create("test-owner", "test-repo", 42, It.Is<string>(b =>
+                b.Contains("PR Review: Merge Blocked") &&
+                b.Contains("Action Required (Critical & High Priority)") &&
+                !b.Contains("Code Health Score"))),
+            Times.Once);
+
+        // 4. Review submission contains inline comment and concise body
         capturedPayload.Should().NotBeNull();
         capturedPayload!.Comments.Should().NotBeNull();
         capturedPayload.Comments.Should().ContainSingle(c => c.Path == "Program.cs" && c.Line == 10);
-        capturedPayload.Body.Should().Contain("PR Review: Merge Blocked");
-        capturedPayload.Body.Should().Contain("Action Required (Critical & High Priority)");
-        capturedPayload.Body.Should().NotContain("Code Health Score");
+        capturedPayload.Body.Should().Contain("Changes requested based on automated review findings");
     }
 
     [Fact]
