@@ -133,7 +133,7 @@ public static class CodeReviewPrompt
 
         RESPONSE REQUIREMENTS:
         - You MUST respond with pure, valid JSON adhering to the exact schema below.
-        - Output the "file_reviews" array FIRST so all issues across all files are systematically itemized before writing the summary.
+        - Output "defect_reconciliations" (reconciling all prior defects) and "file_reviews" (itemizing all file findings) before writing the summary.
         - Do not output any markdown text, backticks, or commentary outside of the JSON block.
         - CRITICAL JSON ESCAPING: All newlines inside string values (such as "message" and "summary") MUST be properly escaped as \n. Never emit raw unescaped line breaks or control characters inside JSON string literals.
 
@@ -148,6 +148,8 @@ public static class CodeReviewPrompt
           "defect_reconciliations": [
             {
               "comment_id": 1234567,
+              "file": "path/to/file.ext",
+              "line": 42,
               "status": "resolved|still_active",
               "resolution_note": "Explanation citing the code change or why issue remains."
             }

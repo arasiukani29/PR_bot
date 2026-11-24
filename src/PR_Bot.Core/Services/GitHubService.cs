@@ -359,32 +359,25 @@ public sealed class GitHubService : IGitHubService
                 }
             }
 
-            // Check if AI explicitly reconciled this defect as resolved
+            // Check if AI explicitly reconciled this defect as resolved or still active
             var priorMatch = context.PriorDefects.FirstOrDefault(d => d.CommentId == comment.Id);
             bool aiSaysResolved = priorMatch?.IsResolved == true;
+            bool aiSaysStillActive = priorMatch != null && string.Equals(priorMatch.ReconciliationStatus, "still_active", StringComparison.OrdinalIgnoreCase);
 
-            // Check if the lines around commentLine were modified in the patch
-            bool lineWasModified = changedFile?.Patch != null &&
-                                  changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 3);
+            // Check if the lines around commentLine were modified in the patch or if GitHub marked the comment as Outdated
+            bool lineWasModified = (comment.Position == null) ||
+                                  (changedFile?.Patch != null &&
+                                   changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 10));
 
-            // A defect is ONLY resolved if:
-            // 1. When PriorDefects tracking is active: AI MUST have confirmed the resolution (aiSaysResolved).
-            //    We NEVER assume a defect is resolved just because the AI didn't re-report it!
-            // 2. When PriorDefects tracking is not active (fallback for isolated unit tests):
-            //    The line was modified AND no defect was reported on this line.
-            bool isResolved;
-            if (context.PriorDefects.Count > 0)
-            {
-                isResolved = aiSaysResolved;
-            }
-            else
-            {
-                bool isStillDefective = result.Comments.Any(c =>
-                    c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
-                    Math.Abs(c.Line - commentLine) <= 3);
+            // Check if defect is still reported in current review findings
+            bool isStillDefective = result.Comments.Any(c =>
+                c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs(c.Line - commentLine) <= 10);
 
-                isResolved = !isStillDefective && lineWasModified && changedFile != null;
-            }
+            // A defect is resolved if:
+            // 1. AI explicitly verified it as resolved (aiSaysResolved), OR
+            // 2. AI did NOT explicitly confirm it as still active, the code was modified/outdated, the file is in the PR, and NO defect was found on that code in this run.
+            bool isResolved = aiSaysResolved || (!aiSaysStillActive && !isStillDefective && lineWasModified && changedFile != null);
 
             if (isResolved)
             {

@@ -445,8 +445,21 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                     var note = item.TryGetProperty("resolution_note", out var noteProp) ? noteProp.GetString() : null;
 
                     var priorDefect = context.PriorDefects.FirstOrDefault(d => d.CommentId == commentId);
+                    if (priorDefect == null && item.TryGetProperty("file", out var fileProp))
+                    {
+                        var fName = fileProp.GetString();
+                        int? fLine = item.TryGetProperty("line", out var lineProp) && lineProp.TryGetInt32(out var lVal) ? lVal : null;
+                        if (!string.IsNullOrWhiteSpace(fName))
+                        {
+                            priorDefect = context.PriorDefects.FirstOrDefault(d =>
+                                d.FilePath.Equals(fName, StringComparison.OrdinalIgnoreCase) &&
+                                (!fLine.HasValue || Math.Abs(d.Line - fLine.Value) <= 10));
+                        }
+                    }
+
                     if (priorDefect != null)
                     {
+                        priorDefect.ReconciliationStatus = status;
                         if (status.Equals("resolved", StringComparison.OrdinalIgnoreCase))
                         {
                             priorDefect.IsResolved = true;
@@ -456,6 +469,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         }
                         else
                         {
+                            priorDefect.IsResolved = false;
                             _logger.LogInformation("Prior defect #{CommentId} on {File}:{Line} verified by AI as STILL ACTIVE: {Note}",
                                 commentId, priorDefect.FilePath, priorDefect.Line, note);
                         }

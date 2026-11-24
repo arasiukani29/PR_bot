@@ -332,7 +332,8 @@ public class GitHubServiceResolutionTests
                     Line = 9,
                     Title = "Missing whitespace trim",
                     OriginalBody = "Add trim",
-                    IsResolved = false // NOT resolved!
+                    IsResolved = false,
+                    ReconciliationStatus = "still_active" // AI explicitly confirmed NOT resolved!
                 }
             ]
         };

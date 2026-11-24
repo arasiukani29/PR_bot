@@ -51,4 +51,9 @@ public sealed class PriorReviewDefect
     /// Optional explanation from AI or patch analysis of how the defect was resolved.
     /// </summary>
     public string? ResolutionExplanation { get; set; }
+
+    /// <summary>
+    /// Explicit reconciliation status from AI review ("resolved", "still_active", or null if not explicitly reconciled).
+    /// </summary>
+    public string? ReconciliationStatus { get; set; }
 }
