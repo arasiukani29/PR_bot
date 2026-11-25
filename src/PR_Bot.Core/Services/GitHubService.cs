@@ -146,7 +146,7 @@ public sealed class GitHubService : IGitHubService
             var priorDefects = new List<PriorReviewDefect>();
             foreach (var comment in existingComments)
             {
-                if (comment.Body == null || comment.InReplyToId.HasValue) continue;
+                if (comment.Body == null) continue;
 
                 bool isBot = comment.Body.Contains(FindingMarkerPrefix) ||
                              comment.Body.Contains(ResolvedMarker) ||
@@ -191,12 +191,8 @@ public sealed class GitHubService : IGitHubService
                     title = "Low priority suggestion";
                 }
 
-                var firstLine = comment.Body.Split('\n')
-                    .Select(l => l.Trim())
-                    .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l) &&
-                                         !l.StartsWith("### ✅ [RESOLVED]", StringComparison.OrdinalIgnoreCase) &&
-                                         !l.StartsWith("<!--")) ?? "";
-                if (!string.IsNullOrWhiteSpace(firstLine) && firstLine.Length < 100)
+                var firstLine = comment.Body.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
+                if (!string.IsNullOrWhiteSpace(firstLine) && firstLine.Length < 100 && !firstLine.StartsWith("<!--"))
                 {
                     title = firstLine;
                 }
@@ -327,10 +323,9 @@ public sealed class GitHubService : IGitHubService
             return deletedCommentIds;
         }
 
-        // Identify parent review comments posted by the bot (skip thread replies)
+        // Identify comments posted by the bot
         var botComments = existingComments.Where(c =>
             c.Body != null &&
-            !c.InReplyToId.HasValue &&
             (c.Body.Contains(FindingMarkerPrefix) ||
              c.Body.Contains(ResolvedMarker) ||
              c.Body.Contains("[RESOLVED]") ||
@@ -595,7 +590,9 @@ public sealed class GitHubService : IGitHubService
         {
             foreach (var activeDefect in result.ActivePriorDefects)
             {
-                if (activeDefect.Line > 0)
+                if (activeDefect.Line > 0 &&
+                    !activeDefect.OriginalBody.Contains(ResolvedMarker) &&
+                    !activeDefect.OriginalBody.Contains("[RESOLVED]"))
                 {
                     var marker = $"{FindingMarkerPrefix}file={activeDefect.FilePath}:line={activeDefect.Line} -->";
 
