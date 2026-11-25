@@ -105,7 +105,7 @@ public static class CodeReviewPrompt
            - UNTOUCHED CODE = STILL ACTIVE: If the developer did not modify the code for a defect, or if the original problem still persists, you MUST mark it as "still_active" with a note explaining that no fix was applied.
            - NEVER EXCUSE EXISTING DEFECTS: Never mark a defect as "resolved" simply because you consider the code "acceptable" or because surrounding code has other attributes. If the specific issue reported previously has not been explicitly fixed by new code, it remains "still_active".
            - Populate the "defect_reconciliations" array for EVERY prior defect.
-           - In parallel, exhaustively audit ALL changed files for ANY NEW defects under "file_reviews".
+           - MANDATORY INDEPENDENT PASS FOR NEW BUGS: Even when "defect_reconciliations" has active prior defects, you MUST still perform a complete, independent line-by-line audit of ALL changed lines across ALL files and report EVERY new bug in "file_reviews". Never skip or cut short "file_reviews" because prior defects exist.
 
         PRIORITY CLASSIFICATION (4-TIER AI-DRIVEN IMPACT HIERARCHY):
         You (the AI Team Lead) decide the priority of every finding based on its real-world blast radius and exploitability:
@@ -243,7 +243,10 @@ public static class CodeReviewPrompt
             {diffChunk}
 
             MANDATORY REVIEW INSTRUCTIONS:
-            1. STRICT DEFECT RECONCILIATION (DEFAULT = "still_active"):
+            1. TWO SEPARATE MANDATORY TASKS (DO NOT SKIP NEW BUGS):
+               - Task A ("defect_reconciliations"): Check every item under PREVIOUS ACTIVE DEFECTS.
+               - Task B ("file_reviews"): Independently inspect EVERY changed line and function in the diff above and report ALL new bugs across all files. Even if Task A has active defects, you MUST still complete Task B in full—never omit new findings from "file_reviews".
+            2. STRICT DEFECT RECONCILIATION (DEFAULT = "still_active"):
                - For every defect listed under PREVIOUS ACTIVE DEFECTS:
                - Did the developer write new code in this commit that explicitly fixed the exact issue described?
                - If YES: set status to "resolved" and explain the exact code fix in "resolution_note".
