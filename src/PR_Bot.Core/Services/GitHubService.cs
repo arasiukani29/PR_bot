@@ -359,6 +359,10 @@ public sealed class GitHubService : IGitHubService
                 }
             }
 
+            // Check if the file itself was deleted in this PR
+            bool isFileRemoved = changedFile != null &&
+                                 changedFile.Status.Equals("removed", StringComparison.OrdinalIgnoreCase);
+
             // Check if AI explicitly reconciled this defect as resolved or still active
             var priorMatch = context.PriorDefects.FirstOrDefault(d => d.CommentId == comment.Id);
             bool aiSaysResolved = priorMatch?.IsResolved == true;
@@ -369,15 +373,23 @@ public sealed class GitHubService : IGitHubService
                                   (changedFile?.Patch != null &&
                                    changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 10));
 
-            // Check if defect is still reported in current review findings
-            bool isStillDefective = result.Comments.Any(c =>
+            // Check if defect is still reported in current review findings (by line proximity or matching title in the same file)
+            bool sameTitleInFile = priorMatch != null &&
+                                   !string.IsNullOrWhiteSpace(priorMatch.Title) &&
+                                   result.Comments.Any(c =>
+                                       c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
+                                       !string.IsNullOrWhiteSpace(c.Title) &&
+                                       c.Title.Equals(priorMatch.Title, StringComparison.OrdinalIgnoreCase));
+
+            bool isStillDefective = sameTitleInFile || result.Comments.Any(c =>
                 c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
                 Math.Abs(c.Line - commentLine) <= 10);
 
             // A defect is resolved if:
-            // 1. AI explicitly verified it as resolved (aiSaysResolved), OR
-            // 2. AI did NOT explicitly confirm it as still active, the code was modified/outdated, the file is in the PR, and NO defect was found on that code in this run.
-            bool isResolved = aiSaysResolved || (!aiSaysStillActive && !isStillDefective && lineWasModified && changedFile != null);
+            // 1. The file was removed in this PR, OR
+            // 2. AI explicitly verified it as resolved (aiSaysResolved), OR
+            // 3. AI did NOT explicitly confirm it as still active, the code was modified/outdated, the file is in the PR, and NO defect was found on that code in this run.
+            bool isResolved = isFileRemoved || aiSaysResolved || (!aiSaysStillActive && !isStillDefective && lineWasModified && changedFile != null);
 
             if (isResolved)
             {
@@ -420,9 +432,10 @@ public sealed class GitHubService : IGitHubService
                     : "";
 
                 // 1. Edit the parent comment header to indicate [RESOLVED] while keeping original finding details intact
+                var resolvedHeader = isFileRemoved ? "### ✅ [RESOLVED - File Removed]" : "### ✅ [RESOLVED]";
                 string updatedBody = comment.Body.Contains("[RESOLVED]")
                     ? comment.Body
-                    : $"### ✅ [RESOLVED]\n\n{comment.Body}\n\n{ResolvedMarker}";
+                    : $"{resolvedHeader}\n\n{comment.Body}\n\n{ResolvedMarker}";
 
                 try
                 {
@@ -990,10 +1003,14 @@ public sealed class GitHubService : IGitHubService
         try
         {
             var query = """
-                query ($owner: String!, $repo: String!, $pr: Int!) {
+                query ($owner: String!, $repo: String!, $pr: Int!, $after: String) {
                   repository(owner: $owner, name: $repo) {
                     pullRequest(number: $pr) {
-                      reviewThreads(first: 100) {
+                      reviewThreads(first: 100, after: $after) {
+                        pageInfo {
+                          hasNextPage
+                          endCursor
+                        }
                         nodes {
                           id
                           isResolved
@@ -1010,73 +1027,92 @@ public sealed class GitHubService : IGitHubService
                 """;
 
             var endpoint = new Uri("graphql", UriKind.Relative);
-            var queryPayload = new
-            {
-                query,
-                variables = new { owner, repo, pr = prNumber }
-            };
+            string? cursor = null;
+            bool hasNextPage = true;
 
-            var response = await _client.Connection.Post<object>(
-                endpoint,
-                queryPayload,
-                "application/vnd.github+json",
-                "application/json",
-                (IDictionary<string, string>?)null,
-                cancellationToken);
-
-            string? rawJson = response?.HttpResponse?.Body?.ToString();
-            if (string.IsNullOrWhiteSpace(rawJson) && response?.Body != null)
+            while (hasNextPage)
             {
-                rawJson = System.Text.Json.JsonSerializer.Serialize(response.Body);
-            }
-
-            if (string.IsNullOrWhiteSpace(rawJson))
-            {
-                return null;
-            }
-
-            using var doc = System.Text.Json.JsonDocument.Parse(rawJson);
-            if (doc.RootElement.TryGetProperty("errors", out var errors))
-            {
-                _logger.LogWarning("GitHub GraphQL query returned errors: {Errors}", errors.ToString());
-                return null;
-            }
-
-            if (!doc.RootElement.TryGetProperty("data", out var data) ||
-                !data.TryGetProperty("repository", out var repoElem) ||
-                !repoElem.TryGetProperty("pullRequest", out var prElem) ||
-                !prElem.TryGetProperty("reviewThreads", out var reviewThreads) ||
-                !reviewThreads.TryGetProperty("nodes", out var threadNodes))
-            {
-                return null;
-            }
-
-            foreach (var thread in threadNodes.EnumerateArray())
-            {
-                if (requiredResolvedState.HasValue)
+                var queryPayload = new
                 {
-                    bool isRes = thread.TryGetProperty("isResolved", out var isResProp) && isResProp.GetBoolean();
-                    if (isRes != requiredResolvedState.Value)
+                    query,
+                    variables = new { owner, repo, pr = prNumber, after = cursor }
+                };
+
+                var response = await _client.Connection.Post<object>(
+                    endpoint,
+                    queryPayload,
+                    "application/vnd.github+json",
+                    "application/json",
+                    (IDictionary<string, string>?)null,
+                    cancellationToken);
+
+                string? rawJson = response?.HttpResponse?.Body?.ToString();
+                if (string.IsNullOrWhiteSpace(rawJson) && response?.Body != null)
+                {
+                    rawJson = System.Text.Json.JsonSerializer.Serialize(response.Body);
+                }
+
+                if (string.IsNullOrWhiteSpace(rawJson))
+                {
+                    return null;
+                }
+
+                using var doc = System.Text.Json.JsonDocument.Parse(rawJson);
+                if (doc.RootElement.TryGetProperty("errors", out var errors))
+                {
+                    _logger.LogWarning("GitHub GraphQL query returned errors: {Errors}", errors.ToString());
+                    return null;
+                }
+
+                if (!doc.RootElement.TryGetProperty("data", out var data) ||
+                    !data.TryGetProperty("repository", out var repoElem) ||
+                    !repoElem.TryGetProperty("pullRequest", out var prElem) ||
+                    !prElem.TryGetProperty("reviewThreads", out var reviewThreads) ||
+                    !reviewThreads.TryGetProperty("nodes", out var threadNodes))
+                {
+                    return null;
+                }
+
+                foreach (var thread in threadNodes.EnumerateArray())
+                {
+                    if (requiredResolvedState.HasValue)
+                    {
+                        bool isRes = thread.TryGetProperty("isResolved", out var isResProp) && isResProp.GetBoolean();
+                        if (isRes != requiredResolvedState.Value)
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (!thread.TryGetProperty("id", out var idProp))
                     {
                         continue;
                     }
-                }
 
-                if (!thread.TryGetProperty("id", out var idProp))
-                {
-                    continue;
-                }
-
-                if (thread.TryGetProperty("comments", out var commentsElem) &&
-                    commentsElem.TryGetProperty("nodes", out var commentNodes))
-                {
-                    foreach (var c in commentNodes.EnumerateArray())
+                    if (thread.TryGetProperty("comments", out var commentsElem) &&
+                        commentsElem.TryGetProperty("nodes", out var commentNodes))
                     {
-                        if (c.TryGetProperty("databaseId", out var dbId) && dbId.GetInt64() == commentId)
+                        foreach (var c in commentNodes.EnumerateArray())
                         {
-                            return idProp.GetString();
+                            if (c.TryGetProperty("databaseId", out var dbId) && dbId.GetInt64() == commentId)
+                            {
+                                return idProp.GetString();
+                            }
                         }
                     }
+                }
+
+                hasNextPage = reviewThreads.TryGetProperty("pageInfo", out var pageInfo) &&
+                              pageInfo.TryGetProperty("hasNextPage", out var hasNextProp) &&
+                              hasNextProp.GetBoolean();
+
+                cursor = hasNextPage && pageInfo.TryGetProperty("endCursor", out var endCursorProp)
+                    ? endCursorProp.GetString()
+                    : null;
+
+                if (hasNextPage && string.IsNullOrWhiteSpace(cursor))
+                {
+                    break;
                 }
             }
         }

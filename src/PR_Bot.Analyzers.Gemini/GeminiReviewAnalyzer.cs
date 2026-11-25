@@ -47,7 +47,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             return [];
         }
 
-        var chunks = BuildDiffChunks(context, _options.MaxChunkCharacters, _options);
+        var chunks = BuildDiffChunksWithFiles(context, _options.MaxChunkCharacters, _options);
         if (chunks.Count == 0)
         {
             _logger.LogInformation("No modified files with patch diffs to review.");
@@ -74,10 +74,13 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
         for (int i = 0; i < chunks.Count; i++)
         {
-            var chunk = chunks[i];
+            var (chunk, chunkFiles) = chunks[i];
             _logger.LogInformation("Analyzing chunk {Index}/{Total} ({Length} chars)...", i + 1, chunks.Count, chunk.Length);
 
-            var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, context.Description, chunk, context.PriorDefects);
+            var chunkPriorDefects = context.PriorDefects
+                .Where(d => chunkFiles.Contains(d.FilePath))
+                .ToList();
+            var userPrompt = CodeReviewPrompt.BuildUserMessage(context.Title, context.Author, context.Description, chunk, chunkPriorDefects);
             string? jsonResponse = null;
 
             var modelQueue = new List<string> { currentWorkingModel };
@@ -191,6 +194,19 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
     public static List<string> BuildDiffChunks(PullRequestContext context, int maxChunkSize, GeminiOptions? options)
     {
+        return BuildDiffChunksWithFiles(context, maxChunkSize, options)
+            .Select(c => c.Payload)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Builds diff chunks alongside the set of file paths included in each chunk so prior defects can be scoped per chunk.
+    /// </summary>
+    public static List<(string Payload, IReadOnlySet<string> Files)> BuildDiffChunksWithFiles(
+        PullRequestContext context,
+        int maxChunkSize,
+        GeminiOptions? options = null)
+    {
         var opts = options ?? new GeminiOptions();
         var eligibleFiles = context.ChangedFiles
             .Where(f => !string.IsNullOrWhiteSpace(f.Patch) && !f.Status.Equals("removed", StringComparison.OrdinalIgnoreCase))
@@ -198,7 +214,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
         if (eligibleFiles.Count == 0) return [];
 
-        var chunks = new List<string>();
+        var chunks = new List<(string Payload, IReadOnlySet<string> Files)>();
         var currentBatch = new List<PullRequestFileChange>();
         int currentChars = 0;
 
@@ -210,7 +226,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
             if (exceedsChars || exceedsFiles)
             {
-                chunks.Add(RenderBatchPayload(currentBatch, opts));
+                var fileSet = currentBatch.Select(f => f.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                chunks.Add((RenderBatchPayload(currentBatch, opts), fileSet));
                 currentBatch.Clear();
                 currentChars = 0;
             }
@@ -221,7 +238,8 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
         if (currentBatch.Count > 0)
         {
-            chunks.Add(RenderBatchPayload(currentBatch, opts));
+            var fileSet = currentBatch.Select(f => f.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            chunks.Add((RenderBatchPayload(currentBatch, opts), fileSet));
         }
 
         return chunks;

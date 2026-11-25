@@ -347,4 +347,49 @@ public class ReviewEngineTests
         result.HasDefectsAtOrAbove(AnalyzerSeverity.Error).Should().BeTrue();
         result.HasDefectsAtOrAbove(AnalyzerSeverity.Warning).Should().BeTrue();
     }
+
+    [Fact]
+    public async Task RunAsync_WhenPriorDefectIsNewlyResolved_KeepsUnrelatedNewFindingInSameFile()
+    {
+        // Arrange: Prior defect at line 10 is newly resolved; analyzer reports a brand-new defect at line 100 in the same file.
+        var analyzer = new Mock<IReviewAnalyzer>();
+        analyzer.SetupGet(a => a.Name).Returns("Mock");
+        analyzer.Setup(a => a.AnalyzeAsync(It.IsAny<PullRequestContext>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync([
+                new ReviewComment { FilePath = "AuthService.cs", Line = 100, Body = "New bug at line 100", AnalyzerName = "Mock" }
+            ]);
+
+        var engine = new ReviewEngine([analyzer.Object]);
+
+        var context = new PullRequestContext
+        {
+            Owner = "test",
+            Repo = "test",
+            PullRequestNumber = 1,
+            Title = "PR",
+            Author = "user",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 10,
+                    FilePath = "AuthService.cs",
+                    Line = 10,
+                    Title = "Old bug",
+                    OriginalBody = "Old bug",
+                    IsResolved = true,
+                    WasPreviouslyResolved = false
+                }
+            ]
+        };
+
+        // Act
+        var result = await engine.RunAsync(context);
+
+        // Assert: The unrelated new finding at line 100 MUST be preserved!
+        result.Comments.Should().ContainSingle(c => c.FilePath == "AuthService.cs" && c.Line == 100);
+    }
 }

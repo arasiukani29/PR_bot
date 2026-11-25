@@ -1268,4 +1268,269 @@ public class GitHubServiceResolutionTests
         capturedMutationPayload.Should().NotBeNull();
         capturedMutationPayload.ToString().Should().Contain("PRRT_test123");
     }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenFileIsRemoved_MarksCommentResolvedWithFileRemovedHeader()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "1234567890abcdef",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/LegacyService.cs",
+                    Status = "removed",
+                    Additions = 0,
+                    Deletions = 40,
+                    Changes = 40
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(
+                4001,
+                "Services/LegacyService.cs",
+                "Legacy bug.\n<!-- pr-bot-finding:file=Services/LegacyService.cs:line=15 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        PullRequestReviewCommentEdit? capturedEdit = null;
+        _reviewCommentsMock
+            .Setup(r => r.Edit("test-owner", "test-repo", 4001, It.IsAny<PullRequestReviewCommentEdit>()))
+            .Callback<string, string, long, PullRequestReviewCommentEdit>((_, _, _, edit) => capturedEdit = edit)
+            .ReturnsAsync(CreateComment(4001, "Services/LegacyService.cs", "updated"));
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert
+        capturedEdit.Should().NotBeNull();
+        capturedEdit!.Body.Should().Contain("### ✅ [RESOLVED - File Removed]");
+        capturedEdit.Body.Should().Contain(GitHubService.ResolvedMarker);
+    }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenUnfixedDefectShiftsBeyondTenLines_DoesNotFalselyResolve()
+    {
+        // Arrange: Defect originally at line 20 shifted to line 35 (same title in same file)
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "1234567890abcdef",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/AuthService.cs",
+                    Status = "modified",
+                    Additions = 15,
+                    Deletions = 0,
+                    Changes = 15,
+                    Patch = "@@ -1,3 +1,18 @@\n+ // 15 lines of comments\n@@ -19,2 +34,2 @@\n+ var x = 1;"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 5001,
+                    FilePath = "Services/AuthService.cs",
+                    Line = 20,
+                    Title = "SQL Injection",
+                    OriginalBody = "SQL Injection",
+                    IsResolved = false
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(
+                5001,
+                "Services/AuthService.cs",
+                "SQL Injection\n<!-- pr-bot-finding:file=Services/AuthService.cs:line=20 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        var currentResult = new ReviewResult
+        {
+            Comments =
+            [
+                new ReviewComment
+                {
+                    FilePath = "Services/AuthService.cs",
+                    Line = 35,
+                    Title = "SQL Injection",
+                    Body = "SQL Injection still here",
+                    AnalyzerName = "GeminiAI"
+                }
+            ]
+        };
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, currentResult);
+
+        // Assert: Must NOT mark comment #5001 as resolved because same-title defect is still active at line 35!
+        _reviewCommentsMock.Verify(
+            r => r.Edit(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_PaginatesGraphQLThreadsBeyondFirst100()
+    {
+        // Arrange
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "fedcba9876543210",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/UserService.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -10,3 +10,4 @@\n- old\n+ fixed"
+                }
+            ]
+        };
+
+        var comment = CreateComment(6001, "Services/UserService.cs", "Bug\n<!-- pr-bot-finding:file=Services/UserService.cs:line=11 -->");
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([comment]);
+
+        var page1Json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequest": {
+                "reviewThreads": {
+                  "pageInfo": { "hasNextPage": true, "endCursor": "cursor_page_2" },
+                  "nodes": [
+                    {
+                      "id": "PRRT_other",
+                      "isResolved": false,
+                      "comments": { "nodes": [ { "databaseId": 1111 } ] }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+        """;
+
+        var page2Json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequest": {
+                "reviewThreads": {
+                  "pageInfo": { "hasNextPage": false, "endCursor": null },
+                  "nodes": [
+                    {
+                      "id": "PRRT_page2_match",
+                      "isResolved": false,
+                      "comments": { "nodes": [ { "databaseId": 6001 } ] }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+        """;
+
+        var page1ResponseMock = new Mock<IApiResponse<object>>();
+        var page1HttpMock = new Mock<IResponse>();
+        page1HttpMock.SetupGet(h => h.Body).Returns(page1Json);
+        page1ResponseMock.SetupGet(a => a.HttpResponse).Returns(page1HttpMock.Object);
+
+        var page2ResponseMock = new Mock<IApiResponse<object>>();
+        var page2HttpMock = new Mock<IResponse>();
+        page2HttpMock.SetupGet(h => h.Body).Returns(page2Json);
+        page2ResponseMock.SetupGet(a => a.HttpResponse).Returns(page2HttpMock.Object);
+
+        var mutationResponseMock = new Mock<IApiResponse<object>>();
+        object? capturedMutationPayload = null;
+
+        var connectionMock = new Mock<IConnection>();
+        connectionMock
+            .SetupSequence(c => c.Post<object>(
+                It.Is<Uri>(u => u.OriginalString == "graphql"),
+                It.Is<object>(o => o.ToString()!.Contains("reviewThreads")),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(page1ResponseMock.Object)
+            .ReturnsAsync(page2ResponseMock.Object);
+
+        connectionMock
+            .Setup(c => c.Post<object>(
+                It.Is<Uri>(u => u.OriginalString == "graphql"),
+                It.Is<object>(o => o.ToString()!.Contains("resolveReviewThread")),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>(
+                (_, payload, _, _, _, _) => capturedMutationPayload = payload)
+            .ReturnsAsync(mutationResponseMock.Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert
+        capturedMutationPayload.Should().NotBeNull();
+        capturedMutationPayload!.ToString().Should().Contain("PRRT_page2_match");
+    }
 }

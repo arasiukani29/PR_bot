@@ -1361,4 +1361,38 @@ public class GeminiReviewAnalyzerTests
         message.Should().Contain("App.cs");
         message.Should().Contain("Missing Dispose call");
     }
+
+    [Fact]
+    public void BuildDiffChunksWithFiles_ShouldTrackFilesPerChunkForScopingPriorDefects()
+    {
+        // Arrange: 2 files, MaxFilesPerChunk = 1 -> produces 2 chunks
+        var context = new PullRequestContext
+        {
+            Owner = "owner",
+            Repo = "repo",
+            PullRequestNumber = 1,
+            Title = "Multi-chunk PR",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "sha",
+            ChangedFiles =
+            [
+                new PullRequestFileChange { FileName = "FileA.cs", Status = "modified", Additions = 1, Deletions = 0, Changes = 1, Patch = "@@ -1 +1 @@\n+a" },
+                new PullRequestFileChange { FileName = "FileB.cs", Status = "modified", Additions = 1, Deletions = 0, Changes = 1, Patch = "@@ -1 +1 @@\n+b" }
+            ]
+        };
+
+        var options = new GeminiOptions { MaxFilesPerChunk = 1 };
+
+        // Act
+        var chunks = GeminiReviewAnalyzer.BuildDiffChunksWithFiles(context, options.MaxChunkCharacters, options);
+
+        // Assert
+        chunks.Should().HaveCount(2);
+        chunks[0].Files.Should().Contain("FileA.cs");
+        chunks[0].Files.Should().NotContain("FileB.cs");
+        chunks[1].Files.Should().Contain("FileB.cs");
+        chunks[1].Files.Should().NotContain("FileA.cs");
+    }
 }

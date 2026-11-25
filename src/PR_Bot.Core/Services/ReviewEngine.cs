@@ -96,7 +96,7 @@ public sealed class ReviewEngine : IReviewEngine
                 reviewResult.Comments.RemoveAll(c =>
                     newlyResolved.Any(r =>
                         r.FilePath.Equals(c.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                        Math.Abs(c.Line - c.Line) <= 3));
+                        Math.Abs(r.Line - c.Line) <= 3));
             }
 
             reviewResult.ResolvedDefects.AddRange(context.PriorDefects.Where(d => d.IsResolved));
