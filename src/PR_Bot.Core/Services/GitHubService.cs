@@ -20,6 +20,10 @@ public sealed class GitHubService : IGitHubService
         @"<!--\s*pr-bot-finding:file=(?<file>[^:]+):line=(?<line>\d+)\s*-->",
         System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    private static readonly System.Text.RegularExpressions.Regex ResolvedCommitRegex = new(
+        @"<!--\s*pr-bot-resolved:commit=(?<sha>[^\s>]+)\s*-->",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private readonly IGitHubClient _client;
     private readonly PrBotOptions _options;
     private readonly IPatchResolutionExtractor _patchExtractor;
@@ -172,6 +176,15 @@ public sealed class GitHubService : IGitHubService
                 }
 
                 bool isResolved = comment.Body.Contains(ResolvedMarker) || comment.Body.Contains("[RESOLVED]");
+                string? resolvedCommitSha = null;
+                if (isResolved)
+                {
+                    var commitMatch = ResolvedCommitRegex.Match(comment.Body);
+                    if (commitMatch.Success)
+                    {
+                        resolvedCommitSha = commitMatch.Groups["sha"].Value;
+                    }
+                }
 
                 var severity = AnalyzerSeverity.Warning;
                 var title = "Flagged finding";
@@ -210,7 +223,8 @@ public sealed class GitHubService : IGitHubService
                     Severity = severity,
                     OriginalBody = comment.Body,
                     IsResolved = isResolved,
-                    WasPreviouslyResolved = isResolved
+                    WasPreviouslyResolved = isResolved,
+                    ResolvedCommitSha = resolvedCommitSha
                 });
             }
 
@@ -440,7 +454,7 @@ public sealed class GitHubService : IGitHubService
                 var resolvedHeader = isFileRemoved ? "### ✅ [RESOLVED - File Removed]" : "### ✅ [RESOLVED]";
                 string updatedBody = comment.Body.Contains("[RESOLVED]")
                     ? comment.Body
-                    : $"{resolvedHeader}\n\n{comment.Body}\n\n{ResolvedMarker}";
+                    : $"{resolvedHeader}\n\n{comment.Body}\n\n{ResolvedMarker}\n<!-- pr-bot-resolved:commit={commitSnippet} -->";
 
                 try
                 {
@@ -455,6 +469,7 @@ public sealed class GitHubService : IGitHubService
                     if (priorMatch != null)
                     {
                         priorMatch.IsResolved = true;
+                        priorMatch.ResolvedCommitSha = commitSnippet;
                     }
                 }
                 catch (Exception ex)
@@ -946,9 +961,12 @@ public sealed class GitHubService : IGitHubService
             foreach (var resolved in result.ResolvedDefects)
             {
                 var link = BuildFileLink(context, resolved.FilePath, resolved.Line);
+                var fixSha = !string.IsNullOrWhiteSpace(resolved.ResolvedCommitSha)
+                    ? resolved.ResolvedCommitSha
+                    : commitSnippet;
                 var note = !string.IsNullOrWhiteSpace(resolved.ResolutionExplanation)
-                    ? $" *(Fixed in `{commitSnippet}`: {resolved.ResolutionExplanation})*"
-                    : $" *(Fixed in `{commitSnippet}`)*";
+                    ? $" *(Fixed in `{fixSha}`: {resolved.ResolutionExplanation})*"
+                    : $" *(Fixed in `{fixSha}`)*";
                 sb.AppendLine($"• {resolved.Title} · {link}{note}");
             }
             sb.AppendLine("</details>");

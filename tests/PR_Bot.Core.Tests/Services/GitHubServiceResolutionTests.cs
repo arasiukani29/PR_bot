@@ -1580,4 +1580,48 @@ public class GitHubServiceResolutionTests
         context.PriorDefects[0].IsResolved.Should().BeTrue();
         context.PriorDefects[0].Title.Should().Be("🔴 **[HIGH]** Missing validation on Name");
     }
+
+    [Fact]
+    public async Task BuildReviewMarkdown_PreservesOriginalResolvedCommitShaAcrossLaterCommits()
+    {
+        // Arrange: Defect was resolved in 7daf16e; current PR HeadSha is 9385ea6
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "9385ea6abcdef"
+        };
+
+        var parentComment = CreateComment(
+            1001,
+            "Models/TagDto.cs",
+            "### ✅ [RESOLVED]\n\n⚠️ **[MEDIUM]** Missing Required\n\n<!-- pr-bot-finding:file=Models/TagDto.cs:line=13 -->\n<!-- pr-bot-resolved -->\n<!-- pr-bot-resolved:commit=7daf16e -->");
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([parentComment]);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        await service.PopulatePriorDefectsAsync(context);
+
+        var result = new ReviewResult
+        {
+            ResolvedDefects = [.. context.PriorDefects]
+        };
+
+        // Act
+        var markdown = GitHubService.BuildReviewMarkdown(context, result);
+
+        // Assert: Shows 7daf16e (when it was actually fixed), NOT 9385ea6 (current commit)!
+        markdown.Should().Contain("Fixed in `7daf16e`");
+        markdown.Should().NotContain("Fixed in `9385ea6`");
+    }
 }

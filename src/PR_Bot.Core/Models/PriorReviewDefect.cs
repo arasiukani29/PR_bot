@@ -56,4 +56,9 @@ public sealed class PriorReviewDefect
     /// Explicit reconciliation status from AI review ("resolved", "still_active", or null if not explicitly reconciled).
     /// </summary>
     public string? ReconciliationStatus { get; set; }
+
+    /// <summary>
+    /// Short commit SHA in which this defect was verified as resolved.
+    /// </summary>
+    public string? ResolvedCommitSha { get; set; }
 }
