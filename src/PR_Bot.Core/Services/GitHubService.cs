@@ -429,7 +429,7 @@ public sealed class GitHubService : IGitHubService
                         Changes = 0,
                         Patch = commitFilePatch
                     }.GetAddedOrModifiedLines();
-                    lineWasModified = commitAddedLines.Any(l => Math.Abs(l - commentLine) <= 10);
+                    lineWasModified = commitAddedLines.Any(l => Math.Abs(l - commentLine) <= 3);
                 }
                 else
                 {
@@ -441,7 +441,7 @@ public sealed class GitHubService : IGitHubService
             {
                 lineWasModified = (comment.Position == null) ||
                                   (changedFile?.Patch != null &&
-                                   changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 10));
+                                   changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 3));
             }
 
             // Check if defect is still reported in current review findings (by line proximity or matching title in the same file)

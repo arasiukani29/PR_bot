@@ -1794,4 +1794,64 @@ public class GitHubServiceResolutionTests
             r => r.Edit(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<PullRequestReviewCommentEdit>()),
             Times.Never);
     }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenAnotherMethodInSameFileIsFixed_KeepsUnfixedMethodActive()
+    {
+        // Arrange: Line 53 in Create() is fixed, while line 63 in Delete() is untouched (10 lines apart!)
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "d47474f",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Controllers/TagsController.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -50,4 +50,4 @@\n- return CreatedAtAction(nameof(GetById), new { id = Guid.NewGuid() }, created);\n+ return CreatedAtAction(nameof(GetById), new { id = created.Id }, created);"
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(
+                9001,
+                "Controllers/TagsController.cs",
+                "Hardcoded New Guid\n<!-- pr-bot-finding:file=Controllers/TagsController.cs:line=53 -->"),
+            CreateComment(
+                9002,
+                "Controllers/TagsController.cs",
+                "Destructive Bulk Deletion\n<!-- pr-bot-finding:file=Controllers/TagsController.cs:line=63 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert: Line 53 (#9001) IS resolved, while line 63 (#9002) stays active!
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 9001, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Once);
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 9002, It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Never);
+    }
 }

@@ -477,9 +477,13 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
                     if (priorDefect != null)
                     {
-                        priorDefect.ReconciliationStatus = status;
-                        if (status.Equals("resolved", StringComparison.OrdinalIgnoreCase))
+                        bool noteContradictsResolved = !string.IsNullOrWhiteSpace(note) &&
+                            (note.Contains("STILL ACTIVE", StringComparison.OrdinalIgnoreCase) ||
+                             note.Contains("remains unfixed", StringComparison.OrdinalIgnoreCase));
+
+                        if (status.Equals("resolved", StringComparison.OrdinalIgnoreCase) && !noteContradictsResolved)
                         {
+                            priorDefect.ReconciliationStatus = "resolved";
                             priorDefect.IsResolved = true;
                             priorDefect.ResolutionExplanation = note;
                             _logger.LogInformation("Prior defect #{CommentId} on {File}:{Line} verified by AI as RESOLVED: {Note}",
@@ -487,6 +491,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         }
                         else
                         {
+                            priorDefect.ReconciliationStatus = "still_active";
                             priorDefect.IsResolved = false;
                             _logger.LogInformation("Prior defect #{CommentId} on {File}:{Line} verified by AI as STILL ACTIVE: {Note}",
                                 commentId, priorDefect.FilePath, priorDefect.Line, note);
