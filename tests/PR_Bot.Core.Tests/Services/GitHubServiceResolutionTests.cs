@@ -1854,4 +1854,134 @@ public class GitHubServiceResolutionTests
             r => r.Edit("test-owner", "test-repo", 9002, It.IsAny<PullRequestReviewCommentEdit>()),
             Times.Never);
     }
+
+    [Fact]
+    public async Task PostReviewAsync_WhenNewCommitHasNoNewBugsButActiveUnresolvedDefect_SubmitsRequestChanges()
+    {
+        // Arrange: Commit 2 has 0 new bugs, but an active unresolved high-severity defect remains
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "commit_2_sha",
+            ReviewEventMode = ReviewEventMode.Strict,
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 1001,
+                    FilePath = "Controllers/TagsController.cs",
+                    Line = 63,
+                    Title = "Destructive Bulk Deletion",
+                    OriginalBody = "Deletes all tags",
+                    Severity = AnalyzerSeverity.Error,
+                    IsResolved = false
+                }
+            ]
+        };
+
+        var existingComment = CreateComment(
+            1001,
+            "Controllers/TagsController.cs",
+            "Destructive Bulk Deletion\n<!-- pr-bot-finding:file=Controllers/TagsController.cs:line=63 -->");
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([existingComment]);
+
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReview>());
+
+        ReviewSubmissionPayload? capturedPayload = null;
+        var connectionMock = new Mock<IConnection>();
+        connectionMock
+            .Setup(c => c.Post<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<ReviewSubmissionPayload>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>(
+                (_, payload, _, _, _, _) => capturedPayload = payload as ReviewSubmissionPayload)
+            .ReturnsAsync(new Mock<IApiResponse<PullRequestReview>>().Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.PostReviewAsync(context, new ReviewResult());
+
+        // Assert
+        capturedPayload.Should().NotBeNull();
+        capturedPayload!.Event.Should().Be("REQUEST_CHANGES");
+        capturedPayload.Body.Should().Be("Changes requested based on automated review findings. Please see inline comments and the overall summary above.");
+    }
+
+    [Fact]
+    public async Task PostReviewAsync_WhenAllDefectsResolvedOnNewCommit_SubmitsApprove()
+    {
+        // Arrange: All defects resolved on commit_2_sha
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "commit_2_sha",
+            ReviewEventMode = ReviewEventMode.Strict
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReviewComment>());
+
+        var pullRequestReviewClientMock = new Mock<IPullRequestReviewsClient>();
+        _pullRequestClientMock.SetupGet(p => p.Review).Returns(pullRequestReviewClientMock.Object);
+        pullRequestReviewClientMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(new List<PullRequestReview>());
+
+        ReviewSubmissionPayload? capturedPayload = null;
+        var connectionMock = new Mock<IConnection>();
+        connectionMock
+            .Setup(c => c.Post<PullRequestReview>(
+                It.IsAny<Uri>(),
+                It.IsAny<ReviewSubmissionPayload>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<IDictionary<string, string>>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<Uri, object, string, string, IDictionary<string, string>, CancellationToken>(
+                (_, payload, _, _, _, _) => capturedPayload = payload as ReviewSubmissionPayload)
+            .ReturnsAsync(new Mock<IApiResponse<PullRequestReview>>().Object);
+
+        _gitHubClientMock.SetupGet(c => c.Connection).Returns(connectionMock.Object);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.PostReviewAsync(context, new ReviewResult());
+
+        // Assert
+        capturedPayload.Should().NotBeNull();
+        capturedPayload!.Event.Should().Be("APPROVE");
+        capturedPayload.Body.Should().Be("Approved based on automated review findings. All blockers resolved.");
+    }
 }

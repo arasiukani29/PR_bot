@@ -734,10 +734,13 @@ public sealed class GitHubService : IGitHubService
                  string.Equals(latestBotReview.State.StringValue, "COMMENTED", StringComparison.OrdinalIgnoreCase)
         };
 
-        // If the review state is unchanged and there are no new inline comments, do not submit a duplicate review!
-        if (latestBotReview != null && stateMatches && inlineComments.Count == 0)
+        // Only skip if we already submitted the exact same review state for this exact commit (HeadSha) with no new inline comments.
+        bool sameCommit = latestBotReview != null &&
+                          string.Equals(latestBotReview.CommitId, context.HeadSha, StringComparison.OrdinalIgnoreCase);
+
+        if (latestBotReview != null && sameCommit && stateMatches && inlineComments.Count == 0)
         {
-            _logger.LogInformation("Review status unchanged ({Event}) and no new inline comments. Overall summary updated in-place.", reviewEventStr);
+            _logger.LogInformation("Review status unchanged ({Event}) on commit {Sha} and no new inline comments. Overall summary updated in-place.", reviewEventStr, context.HeadSha);
             return;
         }
 
