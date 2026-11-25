@@ -146,7 +146,7 @@ public sealed class GitHubService : IGitHubService
             var priorDefects = new List<PriorReviewDefect>();
             foreach (var comment in existingComments)
             {
-                if (comment.Body == null) continue;
+                if (comment.Body == null || comment.InReplyToId.HasValue) continue;
 
                 bool isBot = comment.Body.Contains(FindingMarkerPrefix) ||
                              comment.Body.Contains(ResolvedMarker) ||
@@ -191,8 +191,12 @@ public sealed class GitHubService : IGitHubService
                     title = "Low priority suggestion";
                 }
 
-                var firstLine = comment.Body.Split('\n').FirstOrDefault(l => !string.IsNullOrWhiteSpace(l))?.Trim() ?? "";
-                if (!string.IsNullOrWhiteSpace(firstLine) && firstLine.Length < 100 && !firstLine.StartsWith("<!--"))
+                var firstLine = comment.Body.Split('\n')
+                    .Select(l => l.Trim())
+                    .FirstOrDefault(l => !string.IsNullOrWhiteSpace(l) &&
+                                         !l.StartsWith("### ✅ [RESOLVED]", StringComparison.OrdinalIgnoreCase) &&
+                                         !l.StartsWith("<!--")) ?? "";
+                if (!string.IsNullOrWhiteSpace(firstLine) && firstLine.Length < 100)
                 {
                     title = firstLine;
                 }
@@ -323,9 +327,10 @@ public sealed class GitHubService : IGitHubService
             return deletedCommentIds;
         }
 
-        // Identify comments posted by the bot
+        // Identify parent review comments posted by the bot (skip thread replies)
         var botComments = existingComments.Where(c =>
             c.Body != null &&
+            !c.InReplyToId.HasValue &&
             (c.Body.Contains(FindingMarkerPrefix) ||
              c.Body.Contains(ResolvedMarker) ||
              c.Body.Contains("[RESOLVED]") ||
