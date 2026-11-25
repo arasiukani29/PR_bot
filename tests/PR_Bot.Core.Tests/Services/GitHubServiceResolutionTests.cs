@@ -1691,4 +1691,107 @@ public class GitHubServiceResolutionTests
             Times.Never);
         context.PriorDefects[0].IsResolved.Should().BeFalse();
     }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenLatestCommitDoesNotTouchFile_KeepsOldActiveBugOpen()
+    {
+        // Arrange: TagsController.cs:35 had a bug in Commit 1 (so it's in PR's cumulative ChangedFiles),
+        // but Commit 2 (HeadSha) only modified OtherService.cs. The old bug MUST stay active!
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "commit_2_sha",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Controllers/TagsController.cs",
+                    Status = "modified",
+                    Additions = 5,
+                    Deletions = 0,
+                    Changes = 5,
+                    Patch = "@@ -30,0 +31,6 @@\n+ if (tag != null)"
+                },
+                new PullRequestFileChange
+                {
+                    FileName = "Services/OtherService.cs",
+                    Status = "modified",
+                    Additions = 2,
+                    Deletions = 0,
+                    Changes = 2,
+                    Patch = "@@ -1,0 +1,2 @@\n+ // new bug"
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(
+                8001,
+                "Controllers/TagsController.cs",
+                "Inverted Conditional Check\n<!-- pr-bot-finding:file=Controllers/TagsController.cs:line=35 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        // Mock Commit.Get for commit_2_sha: ONLY Services/OtherService.cs was modified!
+        var repoClientMock = new Mock<IRepositoriesClient>();
+        var commitClientMock = new Mock<IRepositoryCommitsClient>();
+        _gitHubClientMock.SetupGet(c => c.Repository).Returns(repoClientMock.Object);
+        repoClientMock.SetupGet(r => r.Commit).Returns(commitClientMock.Object);
+
+        var commitFile = new GitHubCommitFile(
+            sha: "abc",
+            filename: "Services/OtherService.cs",
+            status: "modified",
+            additions: 2,
+            deletions: 0,
+            changes: 2,
+            blobUrl: "",
+            rawUrl: "",
+            contentsUrl: "",
+            patch: "@@ -1,0 +1,2 @@\n+ // new bug",
+            previousFileName: null);
+
+        var gitHubCommit = new GitHubCommit(
+            nodeId: "",
+            label: "",
+            @ref: "",
+            sha: "commit_2_sha",
+            url: "",
+            user: null!,
+            repository: null!,
+            author: null!,
+            commentsUrl: "",
+            commit: null!,
+            committer: null!,
+            htmlUrl: "",
+            stats: null!,
+            parents: [],
+            files: [commitFile]);
+
+        commitClientMock
+            .Setup(c => c.Get("test-owner", "test-repo", "commit_2_sha"))
+            .ReturnsAsync(gitHubCommit);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert: Old active bug in TagsController.cs MUST NOT be edited to [RESOLVED]!
+        _reviewCommentsMock.Verify(
+            r => r.Edit(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Never);
+    }
 }

@@ -351,6 +351,34 @@ public sealed class GitHubService : IGitHubService
              c.Body.Contains("Reported by ") ||
              (c.User?.Login?.Contains("bot", StringComparison.OrdinalIgnoreCase) == true))).ToList();
 
+        // Fetch the latest commit's changed files once so we check whether the latest commit
+        // actually touched a file/line (instead of relying on the cumulative PR-wide diff).
+        Dictionary<string, string?>? headCommitPatches = null;
+        if (botComments.Count > 0 &&
+            !string.IsNullOrWhiteSpace(context.HeadSha) &&
+            !string.Equals(context.HeadSha, "HEAD", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var commit = await _client.Repository.Commit.Get(context.Owner, context.Repo, context.HeadSha);
+                if (commit?.Files != null)
+                {
+                    headCommitPatches = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var f in commit.Files)
+                    {
+                        if (!string.IsNullOrWhiteSpace(f.Filename))
+                        {
+                            headCommitPatches[f.Filename] = f.Patch;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not fetch commit {HeadSha}. Falling back to PR file patches.", context.HeadSha);
+            }
+        }
+
         foreach (var comment in botComments)
         {
             // Skip comments that are already marked resolved
@@ -386,10 +414,35 @@ public sealed class GitHubService : IGitHubService
             var priorMatch = context.PriorDefects.FirstOrDefault(d => d.CommentId == comment.Id);
             bool aiSaysStillActive = priorMatch != null && string.Equals(priorMatch.ReconciliationStatus, "still_active", StringComparison.OrdinalIgnoreCase);
 
-            // Check if the lines around commentLine were modified in the patch or if GitHub marked the comment as Outdated
-            bool lineWasModified = (comment.Position == null) ||
+            // Check if the lines around commentLine were modified in the LATEST commit (or PR patch if commit diff unavailable)
+            bool lineWasModified;
+            if (headCommitPatches != null)
+            {
+                if (headCommitPatches.TryGetValue(comment.Path, out var commitFilePatch) && !string.IsNullOrWhiteSpace(commitFilePatch))
+                {
+                    var commitAddedLines = new PullRequestFileChange
+                    {
+                        FileName = comment.Path,
+                        Status = "modified",
+                        Additions = 0,
+                        Deletions = 0,
+                        Changes = 0,
+                        Patch = commitFilePatch
+                    }.GetAddedOrModifiedLines();
+                    lineWasModified = commitAddedLines.Any(l => Math.Abs(l - commentLine) <= 10);
+                }
+                else
+                {
+                    // File was NOT modified in the latest commit -> do not falsely mark old active bugs resolved
+                    lineWasModified = false;
+                }
+            }
+            else
+            {
+                lineWasModified = (comment.Position == null) ||
                                   (changedFile?.Patch != null &&
                                    changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 10));
+            }
 
             // Check if defect is still reported in current review findings (by line proximity or matching title in the same file)
             bool sameTitleInFile = priorMatch != null &&
@@ -426,25 +479,13 @@ public sealed class GitHubService : IGitHubService
                     "Comment #{CommentId} on {Path}:{Line} detected as RESOLVED. Updating comment in-place...",
                     comment.Id, comment.Path, commentLine);
 
-                // Fetch commit patch for HeadSha to get exact lines added (+) and deleted (-) for the fix
+                // Use the latest commit patch if available, otherwise fall back to PR file patch
                 string? patchToUse = null;
-                if (!string.IsNullOrWhiteSpace(context.HeadSha) &&
-                    !string.Equals(context.HeadSha, "HEAD", StringComparison.OrdinalIgnoreCase))
+                if (headCommitPatches != null &&
+                    headCommitPatches.TryGetValue(comment.Path, out var commitPatch) &&
+                    !string.IsNullOrWhiteSpace(commitPatch))
                 {
-                    try
-                    {
-                        var commit = await _client.Repository.Commit.Get(context.Owner, context.Repo, context.HeadSha);
-                        var commitFile = commit.Files?.FirstOrDefault(f =>
-                            f.Filename.Equals(comment.Path, StringComparison.OrdinalIgnoreCase));
-                        if (!string.IsNullOrWhiteSpace(commitFile?.Patch))
-                        {
-                            patchToUse = commitFile.Patch;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogDebug(ex, "Could not fetch commit patch for {HeadSha} on {Path}. Falling back to PR file patch.", context.HeadSha, comment.Path);
-                    }
+                    patchToUse = commitPatch;
                 }
 
                 patchToUse ??= changedFile?.Patch;
