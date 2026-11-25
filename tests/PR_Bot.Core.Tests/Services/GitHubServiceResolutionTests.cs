@@ -40,7 +40,8 @@ public class GitHubServiceResolutionTests
         long id,
         string path,
         string body,
-        string? diffHunk = null)
+        string? diffHunk = null,
+        long? inReplyToId = null)
     {
         return new PullRequestReviewComment(
             url: "https://api.github.com",
@@ -59,7 +60,7 @@ public class GitHubServiceResolutionTests
             htmlUrl: "https://github.com",
             pullRequestUrl: "https://github.com/pr/1",
             reactions: null!,
-            inReplyToId: null,
+            inReplyToId: inReplyToId,
             pullRequestReviewId: 1,
             authorAssociation: AuthorAssociation.None);
     }
@@ -1532,5 +1533,51 @@ public class GitHubServiceResolutionTests
         // Assert
         capturedMutationPayload.Should().NotBeNull();
         capturedMutationPayload!.ToString().Should().Contain("PRRT_page2_match");
+    }
+
+    [Fact]
+    public async Task PopulatePriorDefectsAsync_SkipsResolutionReplyCommentsAndExtractsOriginalTitle()
+    {
+        // Arrange: Parent resolved comment + bot's own resolution reply in the same thread
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "5522df1"
+        };
+
+        var parentComment = CreateComment(
+            1001,
+            "Models/TagDto.cs",
+            "### ✅ [RESOLVED]\n\n🔴 **[HIGH]** Missing validation on Name\n\n<!-- pr-bot-finding:file=Models/TagDto.cs:line=13 -->\n<!-- pr-bot-resolved -->");
+
+        var replyComment = CreateComment(
+            1002,
+            "Models/TagDto.cs",
+            "✅ Resolved in `7daf16e`.\n\n<!-- pr-bot-resolved -->",
+            inReplyToId: 1001);
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync([parentComment, replyComment]);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.PopulatePriorDefectsAsync(context);
+
+        // Assert: Only the parent comment is loaded (no duplicate from reply), with the real finding title
+        context.PriorDefects.Should().ContainSingle();
+        context.PriorDefects[0].CommentId.Should().Be(1001);
+        context.PriorDefects[0].Line.Should().Be(13);
+        context.PriorDefects[0].IsResolved.Should().BeTrue();
+        context.PriorDefects[0].Title.Should().Be("🔴 **[HIGH]** Missing validation on Name");
     }
 }
