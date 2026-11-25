@@ -1624,4 +1624,71 @@ public class GitHubServiceResolutionTests
         markdown.Should().Contain("Fixed in `7daf16e`");
         markdown.Should().NotContain("Fixed in `9385ea6`");
     }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenAISaysResolvedButLineWasNotModified_DoesNotMarkResolved()
+    {
+        // Arrange: AI hallucinated "resolved" for line 35, but the patch only modified line 5
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 42,
+            Title = "PR 42",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "364848f",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Controllers/TagsController.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 1,
+                    Changes = 2,
+                    Patch = "@@ -5,1 +5,1 @@\n- old_import\n+ new_import"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 7001,
+                    FilePath = "Controllers/TagsController.cs",
+                    Line = 35,
+                    Title = "Inverted Conditional Check",
+                    OriginalBody = "if (tag != null)",
+                    IsResolved = true, // AI hallucinated resolved!
+                    ResolutionExplanation = "Corrected to if (tag == null)"
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(
+                7001,
+                "Controllers/TagsController.cs",
+                "Inverted Conditional Check\n<!-- pr-bot-finding:file=Controllers/TagsController.cs:line=35 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 42))
+            .ReturnsAsync(existingComments);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        // Act
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        // Assert: Comment MUST NOT be marked resolved, and priorMatch.IsResolved is reset to false
+        _reviewCommentsMock.Verify(
+            r => r.Edit(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<PullRequestReviewCommentEdit>()),
+            Times.Never);
+        context.PriorDefects[0].IsResolved.Should().BeFalse();
+    }
 }

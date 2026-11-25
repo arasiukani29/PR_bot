@@ -101,6 +101,7 @@ public static class CodeReviewPrompt
         16. DEFECT RECONCILIATION & ZERO-FALSE-RESOLUTION POLICY:
            - DEFAULT TO 'still_active': You are evaluated on preventing false approvals and premature resolutions. Every previous defect is STILL ACTIVE by default.
            - PROVE THE FIX BEFORE RESOLVING: You are STRICTLY FORBIDDEN from marking a defect as "resolved" unless you see concrete code changes in the diff that explicitly corrected the reported problem.
+           - QUOTE THE EXACT CURRENT LINE: When marking any defect as "resolved", you MUST quote the exact current line(s) from FULL FILE CONTEXT or GIT UNIFIED DIFF in "resolution_note". If the original buggy code still appears in the file, you are STRICTLY FORBIDDEN from marking it "resolved".
            - UNTOUCHED CODE = STILL ACTIVE: If the developer did not modify the code for a defect, or if the original problem still persists, you MUST mark it as "still_active" with a note explaining that no fix was applied.
            - NEVER EXCUSE EXISTING DEFECTS: Never mark a defect as "resolved" simply because you consider the code "acceptable" or because surrounding code has other attributes. If the specific issue reported previously has not been explicitly fixed by new code, it remains "still_active".
            - Populate the "defect_reconciliations" array for EVERY prior defect.

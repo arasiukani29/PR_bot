@@ -384,7 +384,6 @@ public sealed class GitHubService : IGitHubService
 
             // Check if AI explicitly reconciled this defect as resolved or still active
             var priorMatch = context.PriorDefects.FirstOrDefault(d => d.CommentId == comment.Id);
-            bool aiSaysResolved = priorMatch?.IsResolved == true;
             bool aiSaysStillActive = priorMatch != null && string.Equals(priorMatch.ReconciliationStatus, "still_active", StringComparison.OrdinalIgnoreCase);
 
             // Check if the lines around commentLine were modified in the patch or if GitHub marked the comment as Outdated
@@ -403,6 +402,17 @@ public sealed class GitHubService : IGitHubService
             bool isStillDefective = sameTitleInFile || result.Comments.Any(c =>
                 c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
                 Math.Abs(c.Line - commentLine) <= 10);
+
+            // Guard against AI hallucinations: only trust aiSaysResolved if the code around commentLine was actually modified
+            bool aiSaysResolved = priorMatch?.IsResolved == true && lineWasModified;
+            if (priorMatch?.IsResolved == true && !aiSaysResolved && !isFileRemoved)
+            {
+                _logger.LogWarning(
+                    "Rejecting AI 'resolved' claim for comment #{CommentId} on {Path}:{Line} (lineWasModified={Modified}).",
+                    comment.Id, comment.Path, commentLine, lineWasModified);
+                priorMatch.IsResolved = false;
+                priorMatch.ResolutionExplanation = null;
+            }
 
             // A defect is resolved if:
             // 1. The file was removed in this PR, OR
