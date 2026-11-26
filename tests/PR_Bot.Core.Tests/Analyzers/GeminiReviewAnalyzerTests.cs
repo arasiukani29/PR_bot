@@ -1496,4 +1496,88 @@ public class GeminiReviewAnalyzerTests
         comments[1].Line.Should().Be(45);
         comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
     }
+
+    [Fact]
+    public void ParseGeminiResponse_WithUnescapedQuotesInCommaSeparatedCall_ShouldSanitizeAndParse()
+    {
+        // Reproduces JsonReaderException: ')' is invalid after a value when suggested_fix has Method("a", "b")
+        var json = """
+        {
+          "file_reviews": [
+            {
+              "file": "Services/TagService.cs",
+              "findings": [
+                {
+                  "line": 42,
+                  "priority": "high",
+                  "title": "ReDoS Vulnerability",
+                  "category": "Security",
+                  "message": "Unsanitized user input in Regex constructor.",
+                  "why_it_matters": "Attackers can cause CPU exhaustion.",
+                  "suggested_fix": "var regex = new Regex(Regex.Escape(search.Trim()), RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(200));"
+                },
+                {
+                  "line": 58,
+                  "priority": "medium",
+                  "title": "Improper String Join",
+                  "category": "Reliability",
+                  "message": "Use string.Join(",", items) safely.",
+                  "why_it_matters": "Avoids trailing separator.",
+                  "suggested_fix": "return string.Join(",", items);"
+                }
+              ]
+            }
+          ],
+          "summary": "Found 2 issues."
+        }
+        """;
+
+        var (comments, summary) = _analyzer.ParseGeminiResponse(json);
+
+        summary.Should().Be("Found 2 issues.");
+        comments.Should().HaveCount(2);
+        comments[0].Line.Should().Be(42);
+        comments[1].Line.Should().Be(58);
+        comments[1].SuggestedFix.Should().Contain("string.Join");
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_FallbackRegexWithBracesInSuggestedFix_ShouldExtractAllFindings()
+    {
+        // Broken JSON (missing comma between findings) where suggested_fix contains C# braces { }
+        var brokenJson = """
+        {
+          "file_reviews": [
+            {
+              "file": "Controllers/TagsController.cs",
+              "findings": [
+                {
+                  "line": 3,
+                  "priority": "low",
+                  "title": "Unused Using",
+                  "category": "Maintainability",
+                  "message": "Remove unused using directive.",
+                  "suggested_fix": ""
+                }
+                {
+                  "line": 35,
+                  "priority": "high",
+                  "title": "Null Reference Hazard",
+                  "category": "Reliability",
+                  "message": "Tag is dereferenced before null check.",
+                  "suggested_fix": "if (tag == null) { return NotFound(); }"
+                }
+              ]
+            }
+          ]
+        }
+        """;
+
+        var (comments, _) = _analyzer.ParseGeminiResponse(brokenJson);
+
+        comments.Should().HaveCount(2);
+        comments[0].Line.Should().Be(3);
+        comments[1].Line.Should().Be(35);
+        comments[1].SuggestedFix.Should().Be("if (tag == null) { return NotFound(); }");
+    }
 }

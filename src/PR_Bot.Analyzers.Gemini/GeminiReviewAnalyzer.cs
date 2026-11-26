@@ -789,19 +789,15 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             summary = UnescapeJsonString(summaryMatch.Groups["s"].Value);
         }
 
-        // Match individual finding-like JSON objects that contain at least "line" and "message"
-        var objectRegex = new Regex(
-            @"\{[^{}]*""line""\s*:\s*\d+[^{}]*\}",
-            RegexOptions.Singleline);
-
+        // Match individual finding-like JSON objects (balanced braces, ignoring braces inside strings)
         var fileMatches = Regex.Matches(json, @"""file""\s*:\s*""(?<file>(?:\\.|[^""\\])+)""", RegexOptions.Singleline);
 
-        foreach (Match objMatch in objectRegex.Matches(json))
+        foreach (var (block, blockIndex) in ExtractJsonObjectBlocks(json))
         {
-            var block = objMatch.Value;
-
-            // Skip defect_reconciliations entries (which have "status" / "comment_id" instead of "message")
-            if (!Regex.IsMatch(block, @"""message""\s*:"))
+            // Skip outer wrapper objects (root or file_reviews items) and defect_reconciliations entries
+            if (block.Contains("\"findings\"", StringComparison.Ordinal) ||
+                !Regex.IsMatch(block, @"""line""\s*:\s*\d+") ||
+                !Regex.IsMatch(block, @"""message""\s*:"))
             {
                 continue;
             }
@@ -818,7 +814,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
             {
                 for (int i = fileMatches.Count - 1; i >= 0; i--)
                 {
-                    if (fileMatches[i].Index < objMatch.Index)
+                    if (fileMatches[i].Index < blockIndex)
                     {
                         file = UnescapeJsonString(fileMatches[i].Groups["file"].Value);
                         break;
@@ -980,10 +976,90 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         if (next == ',')
         {
             int afterComma = SkipWhitespace(json, nextIdx + 1);
-            return afterComma < json.Length && (IsValidJsonValueStart(json[afterComma]) || json[afterComma] is '}' or ']');
+            if (afterComma >= json.Length)
+            {
+                return false;
+            }
+
+            char afterChar = json[afterComma];
+            if (afterChar == '"')
+            {
+                // In valid JSON, a string following ',' must itself close before ':', ',', '}', or ']'
+                // (unlike code snippets such as Method("a", "b") where "b" is followed by ')').
+                int nextQuote = FindClosingQuoteIndex(json, afterComma + 1);
+                if (nextQuote < 0)
+                {
+                    return false;
+                }
+
+                int afterNextQuote = SkipWhitespace(json, nextQuote + 1);
+                return afterNextQuote < json.Length && json[afterNextQuote] is ':' or ',' or '}' or ']';
+            }
+
+            return IsValidJsonValueStart(afterChar) || afterChar is '}' or ']';
         }
 
         return false;
+    }
+
+    private static int FindClosingQuoteIndex(string s, int startIndex)
+    {
+        bool escaped = false;
+        for (int i = startIndex; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == '\\')
+            {
+                escaped = !escaped;
+            }
+            else if (c == '"' && !escaped)
+            {
+                return i;
+            }
+            else
+            {
+                escaped = false;
+            }
+        }
+        return -1;
+    }
+
+    private static List<(string Block, int Index)> ExtractJsonObjectBlocks(string json)
+    {
+        var blocks = new List<(string Block, int Index)>();
+        var stack = new Stack<int>();
+        bool inString = false;
+        bool escaped = false;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (inString)
+            {
+                if (c == '\\') escaped = !escaped;
+                else if (c == '"' && !escaped) inString = false;
+                else escaped = false;
+            }
+            else
+            {
+                if (c == '"')
+                {
+                    inString = true;
+                    escaped = false;
+                }
+                else if (c == '{')
+                {
+                    stack.Push(i);
+                }
+                else if (c == '}' && stack.Count > 0)
+                {
+                    int start = stack.Pop();
+                    blocks.Add((json[start..(i + 1)], start));
+                }
+            }
+        }
+
+        return blocks;
     }
 
     private static int SkipWhitespace(string s, int index)
