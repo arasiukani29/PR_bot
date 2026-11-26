@@ -44,9 +44,9 @@ public sealed class GeminiOptions
     ];
 
     /// <summary>
-    /// Sampling temperature (lower = more deterministic for code analysis).
+    /// Sampling temperature (0.0 for maximally deterministic code analysis across re-runs).
     /// </summary>
-    public float Temperature { get; set; } = 0.2f;
+    public float Temperature { get; set; } = 0.0f;
 
     /// <summary>
     /// Maximum tokens to return per chunk request.

@@ -1984,4 +1984,43 @@ public class GitHubServiceResolutionTests
         capturedPayload!.Event.Should().Be("APPROVE");
         capturedPayload.Body.Should().Be("Approved based on automated review findings. All blockers resolved.");
     }
+
+    [Fact]
+    public void SnapToDiffHunk_WhenLineIsOutsideHunk_SnapsToClosestValidDiffLine()
+    {
+        var file = new PullRequestFileChange
+        {
+            FileName = "Program.cs",
+            Status = "modified",
+            Additions = 2,
+            Deletions = 0,
+            Changes = 2,
+            Patch = "@@ -18,4 +18,6 @@\n app.UseRouting();\n+app.UseCors();\n+app.UseAuthentication();\n app.UseAuthorization();"
+        };
+
+        // Line 25 is outside the hunk (valid RIGHT lines are 18..21)
+        var (line, startLine) = GitHubService.SnapToDiffHunk(file, 25, startLine: 17);
+
+        line.Should().Be(21);
+        startLine.Should().BeNull();
+    }
+
+    [Fact]
+    public void SnapToDiffHunk_WhenRangeIsFullyInsideHunk_PreservesBothLines()
+    {
+        var file = new PullRequestFileChange
+        {
+            FileName = "Program.cs",
+            Status = "modified",
+            Additions = 2,
+            Deletions = 0,
+            Changes = 2,
+            Patch = "@@ -18,4 +18,6 @@\n app.UseRouting();\n+app.UseCors();\n+app.UseAuthentication();\n app.UseAuthorization();"
+        };
+
+        var (line, startLine) = GitHubService.SnapToDiffHunk(file, 20, startLine: 19);
+
+        line.Should().Be(20);
+        startLine.Should().Be(19);
+    }
 }

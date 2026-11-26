@@ -638,12 +638,15 @@ public sealed class GitHubService : IGitHubService
 
                 if (!isDuplicate)
                 {
-                    int? multilineStart = (comment.StartLine.HasValue && comment.StartLine.Value < comment.Line) ? comment.StartLine.Value : null;
+                    var matchingFile = context.ChangedFiles.FirstOrDefault(f =>
+                        f.FileName.Equals(comment.FilePath, StringComparison.OrdinalIgnoreCase));
+                    var (validLine, validStartLine) = SnapToDiffHunk(matchingFile, comment.Line, comment.StartLine);
+                    int? multilineStart = (validStartLine.HasValue && validStartLine.Value < validLine) ? validStartLine.Value : null;
                     inlineComments.Add(new ReviewCommentSubmissionPayload
                     {
                         Path = comment.FilePath,
                         Body = body,
-                        Line = comment.Line,
+                        Line = validLine,
                         StartLine = multilineStart,
                         Side = "RIGHT",
                         StartSide = multilineStart.HasValue ? "RIGHT" : null
@@ -781,17 +784,67 @@ public sealed class GitHubService : IGitHubService
             }
             catch (ApiException ex) when (reviewPayload.Comments != null && ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
             {
-                _logger.LogWarning("GitHub rejected inline comments ({Message}). Retrying review with summary note only...", ex.Message);
+                _logger.LogWarning("GitHub rejected inline comment batch ({Message}). Submitting review and posting valid inline comments individually...", ex.Message);
+                var originalComments = reviewPayload.Comments;
                 reviewPayload.Comments = null;
-                await _client.Connection.Post<PullRequestReview>(
-                    endpoint,
-                    reviewPayload,
-                    "application/vnd.github+json",
-                    "application/json",
-                    (IDictionary<string, string>?)null,
-                    cancellationToken);
 
-                _logger.LogInformation("Successfully submitted PR review without inline comments.");
+                try
+                {
+                    await _client.Connection.Post<PullRequestReview>(
+                        endpoint,
+                        reviewPayload,
+                        "application/vnd.github+json",
+                        "application/json",
+                        (IDictionary<string, string>?)null,
+                        cancellationToken);
+                }
+                catch (ApiException innerEx) when (reviewEvent != PullRequestReviewEvent.Comment &&
+                                                  (innerEx.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity ||
+                                                   innerEx.StatusCode == System.Net.HttpStatusCode.Forbidden))
+                {
+                    _logger.LogWarning("GitHub rejected {Event} review ({Message}). Retrying review as advisory Comment...", reviewEvent, innerEx.Message);
+                    reviewPayload.Event = "COMMENT";
+                    await _client.Connection.Post<PullRequestReview>(
+                        endpoint,
+                        reviewPayload,
+                        "application/vnd.github+json",
+                        "application/json",
+                        (IDictionary<string, string>?)null,
+                        cancellationToken);
+                }
+
+                var commentEndpoint = new Uri($"repos/{context.Owner}/{context.Repo}/pulls/{context.PullRequestNumber}/comments", UriKind.Relative);
+                int postedCount = 0;
+                foreach (var c in originalComments)
+                {
+                    try
+                    {
+                        var singlePayload = new
+                        {
+                            commit_id = context.HeadSha,
+                            path = c.Path,
+                            body = c.Body,
+                            line = c.Line,
+                            side = c.Side,
+                            start_line = c.StartLine,
+                            start_side = c.StartSide
+                        };
+                        await _client.Connection.Post<PullRequestReviewComment>(
+                            commentEndpoint,
+                            singlePayload,
+                            "application/vnd.github+json",
+                            "application/json",
+                            (IDictionary<string, string>?)null,
+                            cancellationToken);
+                        postedCount++;
+                    }
+                    catch (ApiException commentEx)
+                    {
+                        _logger.LogWarning("Skipped inline comment on {Path}:{Line} ({Message}).", c.Path, c.Line, commentEx.Message);
+                    }
+                }
+
+                _logger.LogInformation("Submitted PR review and posted {Posted}/{Total} inline comment(s) individually.", postedCount, originalComments.Count);
             }
             catch (ApiException ex) when (reviewEvent != PullRequestReviewEvent.Comment &&
                                          (ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity ||
@@ -1339,6 +1392,76 @@ public sealed class GitHubService : IGitHubService
 
         // Advisory issues (Medium or Low severity only) -> Comment
         return PullRequestReviewEvent.Comment;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex DiffHunkHeaderRegex =
+        new(@"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Ensures <paramref name="line"/> and optional <paramref name="startLine"/> fall within valid
+    /// RIGHT-side diff hunk lines for <paramref name="file"/> so GitHub does not reject the review with 422.
+    /// </summary>
+    public static (int Line, int? StartLine) SnapToDiffHunk(PullRequestFileChange? file, int line, int? startLine)
+    {
+        if (file == null || string.IsNullOrWhiteSpace(file.Patch))
+        {
+            return (line, startLine);
+        }
+
+        var validLines = new HashSet<int>();
+        var patchLines = file.Patch.Split('\n');
+        int currentLine = 0;
+        bool inHunk = false;
+
+        foreach (var raw in patchLines)
+        {
+            var l = raw.TrimEnd('\r');
+            var match = DiffHunkHeaderRegex.Match(l);
+            if (match.Success)
+            {
+                inHunk = true;
+                currentLine = int.Parse(match.Groups[1].Value);
+                continue;
+            }
+
+            if (!inHunk) continue;
+
+            if ((l.StartsWith('+') && !l.StartsWith("+++")) || l.StartsWith(' '))
+            {
+                validLines.Add(currentLine);
+                currentLine++;
+            }
+        }
+
+        if (validLines.Count == 0)
+        {
+            return (line, startLine);
+        }
+
+        int resolvedLine = validLines.Contains(line)
+            ? line
+            : validLines.OrderBy(v => Math.Abs(v - line)).First();
+
+        int? resolvedStartLine = null;
+        if (startLine.HasValue && startLine.Value < resolvedLine)
+        {
+            bool allInHunk = true;
+            for (int i = startLine.Value; i <= resolvedLine; i++)
+            {
+                if (!validLines.Contains(i))
+                {
+                    allInHunk = false;
+                    break;
+                }
+            }
+
+            if (allInHunk)
+            {
+                resolvedStartLine = startLine.Value;
+            }
+        }
+
+        return (resolvedLine, resolvedStartLine);
     }
 }
 
