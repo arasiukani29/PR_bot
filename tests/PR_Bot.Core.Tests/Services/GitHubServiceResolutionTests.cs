@@ -2023,4 +2023,70 @@ public class GitHubServiceResolutionTests
         line.Should().Be(20);
         startLine.Should().Be(19);
     }
+
+    [Fact]
+    public async Task ReconcileResolvedCommentsAsync_WhenLinesShiftedByEarlierCommit_StillAcceptsAiResolved()
+    {
+        // Reproduces PR #31: comment was posted at line 125, earlier commit deleted 6 lines above it,
+        // and latest commit fixed Delete() at line 113 (12 lines away from frozen marker 125).
+        var context = new PullRequestContext
+        {
+            Owner = "test-owner",
+            Repo = "test-repo",
+            PullRequestNumber = 31,
+            Title = "PR 31",
+            Author = "dev",
+            BaseBranch = "main",
+            HeadBranch = "feature",
+            HeadSha = "24b715d",
+            ChangedFiles =
+            [
+                new PullRequestFileChange
+                {
+                    FileName = "Services/TagService.cs",
+                    Status = "modified",
+                    Additions = 1,
+                    Deletions = 7,
+                    Changes = 8,
+                    Patch = "@@ -110,10 +110,4 @@\n public bool Delete(Guid id)\n {\n- if (!_tags.ContainsKey(id)) { return false; }\n- _tags.Clear();\n- return true;\n+ return _tags.TryRemove(id, out _);\n }"
+                }
+            ],
+            PriorDefects =
+            [
+                new PriorReviewDefect
+                {
+                    CommentId = 4707218106,
+                    FilePath = "Services/TagService.cs",
+                    Line = 125,
+                    Title = "Catastrophic Data Loss Hazard in Delete Method",
+                    OriginalBody = "_tags.Clear() wipes out store",
+                    IsResolved = true,
+                    ResolutionExplanation = "Delete updated to use _tags.TryRemove(id, out _)."
+                }
+            ]
+        };
+
+        var existingComments = new List<PullRequestReviewComment>
+        {
+            CreateComment(
+                4707218106,
+                "Services/TagService.cs",
+                "Catastrophic Data Loss Hazard\n<!-- pr-bot-finding:file=Services/TagService.cs:line=125 -->")
+        };
+
+        _reviewCommentsMock
+            .Setup(r => r.GetAll("test-owner", "test-repo", 31))
+            .ReturnsAsync(existingComments);
+
+        var service = new GitHubService(
+            _gitHubClientMock.Object,
+            patchExtractor: _patchExtractorMock.Object);
+
+        await service.ReconcileResolvedCommentsAsync(context, new ReviewResult());
+
+        _reviewCommentsMock.Verify(
+            r => r.Edit("test-owner", "test-repo", 4707218106, It.Is<PullRequestReviewCommentEdit>(e => e.Body.Contains("[RESOLVED]"))),
+            Times.Once);
+        context.PriorDefects[0].IsResolved.Should().BeTrue();
+    }
 }

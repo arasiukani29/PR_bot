@@ -415,7 +415,10 @@ public sealed class GitHubService : IGitHubService
             bool aiSaysStillActive = priorMatch != null && string.Equals(priorMatch.ReconciliationStatus, "still_active", StringComparison.OrdinalIgnoreCase);
 
             // Check if the lines around commentLine were modified in the LATEST commit (or PR patch if commit diff unavailable)
+            // Allow a wider line-shift window (±15) for AI-verified resolutions because earlier commits in the PR
+            // may have added/deleted lines above the comment, shifting its line number from the original marker.
             bool lineWasModified;
+            bool lineModifiedNearAiResolution;
             if (headCommitPatches != null)
             {
                 if (headCommitPatches.TryGetValue(comment.Path, out var commitFilePatch) && !string.IsNullOrWhiteSpace(commitFilePatch))
@@ -430,19 +433,23 @@ public sealed class GitHubService : IGitHubService
                         Patch = commitFilePatch
                     }.GetChangedOrDeletedLines();
                     lineWasModified = commitChangedLines.Any(l => Math.Abs(l - commentLine) <= 3);
+                    lineModifiedNearAiResolution = commitChangedLines.Any(l => Math.Abs(l - commentLine) <= 15);
                 }
                 else
                 {
                     // File was not modified in the latest commit; if GitHub already marked the thread outdated
                     // (Position == null) from an earlier commit in this PR, still allow AI verification.
                     lineWasModified = comment.Position == null;
+                    lineModifiedNearAiResolution = lineWasModified;
                 }
             }
             else
             {
+                var prChangedLines = changedFile?.Patch != null ? changedFile.GetChangedOrDeletedLines() : [];
                 lineWasModified = (comment.Position == null) ||
-                                  (changedFile?.Patch != null &&
-                                   changedFile.GetChangedOrDeletedLines().Any(l => Math.Abs(l - commentLine) <= 3));
+                                  prChangedLines.Any(l => Math.Abs(l - commentLine) <= 3);
+                lineModifiedNearAiResolution = (comment.Position == null) ||
+                                               prChangedLines.Any(l => Math.Abs(l - commentLine) <= 15);
             }
 
             // Check if defect is still reported in current review findings (by line proximity or matching title in the same file)
@@ -458,8 +465,8 @@ public sealed class GitHubService : IGitHubService
                 Math.Abs(c.Line - commentLine) <= 10);
 
             // Guard against AI hallucinations: trust aiSaysResolved if the code around commentLine was modified
-            // in the latest commit OR GitHub already marked the comment outdated (Position == null) from a prior commit.
-            bool aiSaysResolved = priorMatch?.IsResolved == true && (lineWasModified || comment.Position == null);
+            // (allowing ±15 lines for line shifts from earlier commits) OR GitHub already marked the comment outdated.
+            bool aiSaysResolved = priorMatch?.IsResolved == true && (lineModifiedNearAiResolution || comment.Position == null);
             if (priorMatch?.IsResolved == true && !aiSaysResolved && !isFileRemoved)
             {
                 _logger.LogWarning(
