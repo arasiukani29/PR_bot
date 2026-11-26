@@ -420,7 +420,7 @@ public sealed class GitHubService : IGitHubService
             {
                 if (headCommitPatches.TryGetValue(comment.Path, out var commitFilePatch) && !string.IsNullOrWhiteSpace(commitFilePatch))
                 {
-                    var commitAddedLines = new PullRequestFileChange
+                    var commitChangedLines = new PullRequestFileChange
                     {
                         FileName = comment.Path,
                         Status = "modified",
@@ -428,20 +428,21 @@ public sealed class GitHubService : IGitHubService
                         Deletions = 0,
                         Changes = 0,
                         Patch = commitFilePatch
-                    }.GetAddedOrModifiedLines();
-                    lineWasModified = commitAddedLines.Any(l => Math.Abs(l - commentLine) <= 3);
+                    }.GetChangedOrDeletedLines();
+                    lineWasModified = commitChangedLines.Any(l => Math.Abs(l - commentLine) <= 3);
                 }
                 else
                 {
-                    // File was NOT modified in the latest commit -> do not falsely mark old active bugs resolved
-                    lineWasModified = false;
+                    // File was not modified in the latest commit; if GitHub already marked the thread outdated
+                    // (Position == null) from an earlier commit in this PR, still allow AI verification.
+                    lineWasModified = comment.Position == null;
                 }
             }
             else
             {
                 lineWasModified = (comment.Position == null) ||
                                   (changedFile?.Patch != null &&
-                                   changedFile.GetAddedOrModifiedLines().Any(l => Math.Abs(l - commentLine) <= 3));
+                                   changedFile.GetChangedOrDeletedLines().Any(l => Math.Abs(l - commentLine) <= 3));
             }
 
             // Check if defect is still reported in current review findings (by line proximity or matching title in the same file)
@@ -456,8 +457,9 @@ public sealed class GitHubService : IGitHubService
                 c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
                 Math.Abs(c.Line - commentLine) <= 10);
 
-            // Guard against AI hallucinations: only trust aiSaysResolved if the code around commentLine was actually modified
-            bool aiSaysResolved = priorMatch?.IsResolved == true && lineWasModified;
+            // Guard against AI hallucinations: trust aiSaysResolved if the code around commentLine was modified
+            // in the latest commit OR GitHub already marked the comment outdated (Position == null) from a prior commit.
+            bool aiSaysResolved = priorMatch?.IsResolved == true && (lineWasModified || comment.Position == null);
             if (priorMatch?.IsResolved == true && !aiSaysResolved && !isFileRemoved)
             {
                 _logger.LogWarning(
@@ -630,11 +632,15 @@ public sealed class GitHubService : IGitHubService
                 var marker = $"{FindingMarkerPrefix}file={comment.FilePath}:line={comment.Line} -->";
                 var body = $"{comment.Body}\n\n<sub>Reported by {comment.AnalyzerName}</sub>\n{marker}";
 
-                // Check if this exact finding has already been posted to avoid duplicate spam across runs
+                // Check if this exact finding has already been posted (by marker, body, or matching title in the same file)
                 var snippet = comment.Body.Length > 80 ? comment.Body[..80] : comment.Body;
                 bool isDuplicate = activeExistingComments.Any(e =>
                     e.Path.Equals(comment.FilePath, StringComparison.OrdinalIgnoreCase) &&
-                    (e.Body.Contains(marker) || e.Body.Contains(comment.Body) || e.Body.Contains(snippet)));
+                    (e.Body.Contains(marker) ||
+                     e.Body.Contains(comment.Body) ||
+                     e.Body.Contains(snippet) ||
+                     (!string.IsNullOrWhiteSpace(comment.Title) &&
+                      e.Body.Contains(comment.Title, StringComparison.OrdinalIgnoreCase))));
 
                 if (!isDuplicate)
                 {

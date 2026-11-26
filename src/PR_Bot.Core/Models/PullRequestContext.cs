@@ -82,4 +82,48 @@ public sealed class PullRequestFileChange
 
         return addedLines;
     }
+
+    /// <summary>
+    /// Returns line numbers in the new file that were added, modified, or adjacent to deleted ('-') lines.
+    /// Used when verifying defect resolutions where a fix may consist solely of deleting vulnerable code.
+    /// </summary>
+    public List<int> GetChangedOrDeletedLines()
+    {
+        var changedLines = new List<int>();
+        if (string.IsNullOrWhiteSpace(Patch)) return changedLines;
+
+        var lines = Patch.Split('\n');
+        int currentLine = 0;
+        bool inHunk = false;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimEnd('\r');
+            var match = HunkRegex.Match(line);
+            if (match.Success)
+            {
+                inHunk = true;
+                currentLine = int.Parse(match.Groups[1].Value);
+                continue;
+            }
+
+            if (!inHunk) continue;
+
+            if (line.StartsWith('+') && !line.StartsWith("+++"))
+            {
+                changedLines.Add(currentLine);
+                currentLine++;
+            }
+            else if (line.StartsWith('-') && !line.StartsWith("---"))
+            {
+                changedLines.Add(currentLine);
+            }
+            else if (line.StartsWith(' '))
+            {
+                currentLine++;
+            }
+        }
+
+        return changedLines;
+    }
 }
