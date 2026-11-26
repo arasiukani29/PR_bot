@@ -1395,4 +1395,105 @@ public class GeminiReviewAnalyzerTests
         chunks[1].Files.Should().Contain("FileB.cs");
         chunks[1].Files.Should().NotContain("FileA.cs");
     }
+
+    [Fact]
+    public void ParseGeminiResponse_WithUnescapedQuotesInsideString_ShouldSanitizeAndParseAllFindings()
+    {
+        // Reproduces JsonReaderException: 'T' is invalid after a value when LLM emits unescaped quotes inside a string
+        var malformedJson = """
+        {
+          "defect_reconciliations": [],
+          "file_reviews": [
+            {
+              "file": "src/Controllers/TagsController.cs",
+              "findings": [
+                {
+                  "line": 18,
+                  "start_line": null,
+                  "priority": "high",
+                  "title": "Missing Tag Validation",
+                  "category": "Input Validation",
+                  "message": "The "Tag" name is not trimmed or validated before saving.",
+                  "why_it_matters": "Whitespace-only tags can be persisted.",
+                  "suggested_fix": "if (string.IsNullOrWhiteSpace(tag.Name)) return BadRequest("Tag name is required");"
+                },
+                {
+                  "line": 32,
+                  "priority": "medium",
+                  "title": "Missing Authorization",
+                  "category": "Security",
+                  "message": "Endpoint lacks [Authorize] attribute.",
+                  "why_it_matters": "Unauthenticated users can modify tags.",
+                  "suggested_fix": null
+                }
+              ]
+            }
+          ],
+          "summary": "Found 2 issues in tags management."
+        }
+        """;
+
+        var (comments, summary) = _analyzer.ParseGeminiResponse(malformedJson);
+
+        summary.Should().Be("Found 2 issues in tags management.");
+        comments.Should().HaveCount(2);
+        comments[0].FilePath.Should().Be("src/Controllers/TagsController.cs");
+        comments[0].Line.Should().Be(18);
+        comments[0].Severity.Should().Be(AnalyzerSeverity.Error);
+        comments[0].Body.Should().Contain("Missing Tag Validation");
+        comments[0].SuggestedFix.Should().Contain("Tag name is required");
+        comments[1].Line.Should().Be(32);
+        comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
+    }
+
+    [Fact]
+    public void ParseGeminiResponse_WhenJsonTruncatedInFileReviewsSchema_ShouldFallbackRegexExtractCompletedFindings()
+    {
+        // Simulates truncated/broken JSON that still fails JsonDocument.Parse after sanitization
+        var truncatedJson = """
+        {
+          "file_reviews": [
+            {
+              "file": "src/Services/TagService.cs",
+              "findings": [
+                {
+                  "line": 24,
+                  "start_line": 22,
+                  "priority": "critical",
+                  "title": "SQL Injection in Tag Lookup",
+                  "category": "Security",
+                  "message": "User input is concatenated directly into SQL query.",
+                  "why_it_matters": "Attackers can read or modify database records.",
+                  "suggested_fix": "return await _db.Tags.FirstOrDefaultAsync(t => t.Name == name);"
+                },
+                {
+                  "line": 45,
+                  "priority": "medium",
+                  "title": "Null Reference Risk",
+                  "category": "Reliability",
+                  "message": "Tag may be null when accessed here."
+                }
+              ]
+            },
+            {
+              "file": "src/Controllers/TagsController.cs",
+              "findings": [
+                {
+                  "line": 12,
+                  "priority": "high",
+                  "message": "Truncated output before closing
+        """;
+
+        var (comments, _) = _analyzer.ParseGeminiResponse(truncatedJson);
+
+        comments.Should().HaveCount(2);
+        comments[0].FilePath.Should().Be("src/Services/TagService.cs");
+        comments[0].Line.Should().Be(24);
+        comments[0].StartLine.Should().Be(22);
+        comments[0].Severity.Should().Be(AnalyzerSeverity.Critical);
+        comments[0].Body.Should().Contain("SQL Injection in Tag Lookup");
+        comments[1].FilePath.Should().Be("src/Services/TagService.cs");
+        comments[1].Line.Should().Be(45);
+        comments[1].Severity.Should().Be(AnalyzerSeverity.Warning);
+    }
 }

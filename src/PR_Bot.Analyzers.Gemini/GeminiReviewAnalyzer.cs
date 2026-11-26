@@ -551,14 +551,6 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         var priorityStr = finding.TryGetProperty("priority", out var pp) ? pp.GetString() :
                           finding.TryGetProperty("severity", out var sp) ? sp.GetString() : "medium";
 
-        var severity = (priorityStr?.ToLowerInvariant()) switch
-        {
-            "critical" => AnalyzerSeverity.Critical,
-            "high" or "error" => AnalyzerSeverity.Error,
-            "low" or "info" => AnalyzerSeverity.Info,
-            _ => AnalyzerSeverity.Warning
-        };
-
         var title = finding.TryGetProperty("title", out var tp) ? tp.GetString() : null;
         var category = finding.TryGetProperty("category", out var cp) ? cp.GetString() : null;
         var whyItMatters = finding.TryGetProperty("why_it_matters", out var wp) ? wp.GetString() : null;
@@ -567,6 +559,32 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         {
             suggestedFix = sfp.GetString();
         }
+
+        return BuildReviewComment(
+            file, line, startLine, priorityStr, title, category,
+            message, whyItMatters, suggestedFix, context, analyzerLabel);
+    }
+
+    private static ReviewComment BuildReviewComment(
+        string file,
+        int line,
+        int? startLine,
+        string? priorityStr,
+        string? title,
+        string? category,
+        string message,
+        string? whyItMatters,
+        string? suggestedFix,
+        PullRequestContext? context,
+        string analyzerLabel)
+    {
+        var severity = (priorityStr?.ToLowerInvariant()) switch
+        {
+            "critical" => AnalyzerSeverity.Critical,
+            "high" or "error" => AnalyzerSeverity.Error,
+            "low" or "info" => AnalyzerSeverity.Info,
+            _ => AnalyzerSeverity.Warning
+        };
 
         string resolvedFile = file;
         int resolvedLine = line;
@@ -757,6 +775,7 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
     /// <summary>
     /// Fallback parser using regular expressions to extract findings and summary when JsonDocument fails on malformed JSON.
+    /// Supports both the nested <c>file_reviews</c> schema and the legacy flat <c>findings</c> schema.
     /// </summary>
     private (List<ReviewComment> Comments, string? Summary) FallbackRegexParse(string json, PullRequestContext? context, string? modelName = null)
     {
@@ -767,86 +786,100 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
         var summaryMatch = Regex.Match(json, @"""summary""\s*:\s*""(?<s>(?:\\.|[^""\\])*)""", RegexOptions.Singleline);
         if (summaryMatch.Success)
         {
-            summary = Regex.Unescape(summaryMatch.Groups["s"].Value);
+            summary = UnescapeJsonString(summaryMatch.Groups["s"].Value);
         }
 
-        // Match individual finding objects in the findings array
-        var findingRegex = new Regex(
-            @"\{\s*""file""\s*:\s*""(?<file>[^""]+)""\s*,\s*""line""\s*:\s*(?<line>\d+)(?:\s*,\s*""start_line""\s*:\s*(?<start_line>\d+))?\s*,\s*""(?:priority|severity)""\s*:\s*""(?<priority>[^""]+)""\s*,\s*""message""\s*:\s*""(?<message>(?:\\.|[^""\\])*)""\s*\}",
+        // Match individual finding-like JSON objects that contain at least "line" and "message"
+        var objectRegex = new Regex(
+            @"\{[^{}]*""line""\s*:\s*\d+[^{}]*\}",
             RegexOptions.Singleline);
 
-        var matches = findingRegex.Matches(json);
-        foreach (Match match in matches)
+        var fileMatches = Regex.Matches(json, @"""file""\s*:\s*""(?<file>(?:\\.|[^""\\])+)""", RegexOptions.Singleline);
+
+        foreach (Match objMatch in objectRegex.Matches(json))
         {
-            var file = match.Groups["file"].Value;
-            var line = int.Parse(match.Groups["line"].Value);
-            int? startLine = null;
-            if (match.Groups["start_line"].Success && int.TryParse(match.Groups["start_line"].Value, out var sl) && sl > 0 && sl < line)
+            var block = objMatch.Value;
+
+            // Skip defect_reconciliations entries (which have "status" / "comment_id" instead of "message")
+            if (!Regex.IsMatch(block, @"""message""\s*:"))
             {
-                startLine = sl;
+                continue;
             }
-            var priorityStr = match.Groups["priority"].Value;
-            var message = Regex.Unescape(match.Groups["message"].Value);
 
-            var severity = (priorityStr.ToLowerInvariant()) switch
+            var lineMatch = Regex.Match(block, @"""line""\s*:\s*(?<line>\d+)");
+            if (!lineMatch.Success || !int.TryParse(lineMatch.Groups["line"].Value, out var line))
             {
-                "critical" => AnalyzerSeverity.Critical,
-                "high" or "error" => AnalyzerSeverity.Error,
-                "low" or "info" => AnalyzerSeverity.Info,
-                _ => AnalyzerSeverity.Warning
-            };
+                continue;
+            }
 
-            string resolvedFile = file;
-            int resolvedLine = line;
-            int? diffPosition = null;
-            if (context != null)
+            // Resolve file from inside the finding object, or from the nearest preceding "file" property (file_reviews schema)
+            string? file = ExtractJsonStringField(block, "file");
+            if (string.IsNullOrWhiteSpace(file))
             {
-                var matchingFile = context.ChangedFiles.FirstOrDefault(f =>
-                    f.FileName.Equals(file, StringComparison.OrdinalIgnoreCase) ||
-                    f.FileName.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase) ||
-                    file.EndsWith("/" + f.FileName, StringComparison.OrdinalIgnoreCase));
-
-                if (matchingFile != null)
+                for (int i = fileMatches.Count - 1; i >= 0; i--)
                 {
-                    resolvedFile = matchingFile.FileName;
-                    resolvedLine = AdjustMeaningfulLine(matchingFile, line);
-                    if (startLine.HasValue)
+                    if (fileMatches[i].Index < objMatch.Index)
                     {
-                        var resolvedStart = AdjustMeaningfulLine(matchingFile, startLine.Value);
-                        if (resolvedStart < resolvedLine)
-                        {
-                            startLine = resolvedStart;
-                        }
-                        else
-                        {
-                            startLine = null;
-                        }
-                    }
-
-                    diffPosition = FindDiffPosition(matchingFile.Patch, resolvedLine);
-                    if (!diffPosition.HasValue)
-                    {
-                        diffPosition = FindClosestDiffPosition(matchingFile.Patch, resolvedLine);
+                        file = UnescapeJsonString(fileMatches[i].Groups["file"].Value);
+                        break;
                     }
                 }
             }
 
-            // Fallback parser doesn't have structured fields — build a simpler rich body
-            var body = BuildRichCommentBody(severity, title: null, category: null, message, whyItMatters: null, suggestedFix: null);
-
-            comments.Add(new ReviewComment
+            if (string.IsNullOrWhiteSpace(file))
             {
-                FilePath = resolvedFile,
-                Line = resolvedLine,
-                StartLine = startLine,
-                DiffPosition = diffPosition,
-                Body = body,
-                Severity = severity,
-                AnalyzerName = analyzerLabel
-            });
+                file = "unknown";
+            }
+
+            int? startLine = null;
+            var startLineMatch = Regex.Match(block, @"""start_line""\s*:\s*(?<sl>\d+)");
+            if (startLineMatch.Success && int.TryParse(startLineMatch.Groups["sl"].Value, out var sl) && sl > 0 && sl < line)
+            {
+                startLine = sl;
+            }
+
+            var priorityStr = ExtractJsonStringField(block, "priority")
+                ?? ExtractJsonStringField(block, "severity")
+                ?? "medium";
+            var title = ExtractJsonStringField(block, "title");
+            var category = ExtractJsonStringField(block, "category");
+            var message = ExtractJsonStringField(block, "message") ?? string.Empty;
+            var whyItMatters = ExtractJsonStringField(block, "why_it_matters");
+            var suggestedFix = ExtractJsonStringField(block, "suggested_fix");
+
+            comments.Add(BuildReviewComment(
+                file, line, startLine, priorityStr, title, category,
+                message, whyItMatters, suggestedFix, context, analyzerLabel));
         }
 
         return (comments, summary);
+    }
+
+    private static string? ExtractJsonStringField(string jsonBlock, string fieldName)
+    {
+        var match = Regex.Match(
+            jsonBlock,
+            $@"""{Regex.Escape(fieldName)}""\s*:\s*""(?<val>(?:\\.|[^""\\])*)""",
+            RegexOptions.Singleline);
+
+        return match.Success ? UnescapeJsonString(match.Groups["val"].Value) : null;
+    }
+
+    private static string UnescapeJsonString(string value)
+    {
+        try
+        {
+            return Regex.Unescape(value);
+        }
+        catch
+        {
+            return value
+                .Replace("\\n", "\n")
+                .Replace("\\r", "\r")
+                .Replace("\\t", "\t")
+                .Replace("\\\"", "\"")
+                .Replace("\\\\", "\\");
+        }
     }
 
     /// <summary>
@@ -874,8 +907,15 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                 }
                 else if (c == '"' && !isEscaped)
                 {
-                    inString = false;
-                    sb.Append(c);
+                    if (IsValidClosingQuote(json, i))
+                    {
+                        inString = false;
+                        sb.Append(c);
+                    }
+                    else
+                    {
+                        sb.Append("\\\"");
+                    }
                 }
                 else
                 {
@@ -916,6 +956,47 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
 
         return sb.ToString();
     }
+
+    private static bool IsValidClosingQuote(string json, int quoteIndex)
+    {
+        int nextIdx = SkipWhitespace(json, quoteIndex + 1);
+        if (nextIdx >= json.Length)
+        {
+            return true;
+        }
+
+        char next = json[nextIdx];
+        if (next is '}' or ']')
+        {
+            return true;
+        }
+
+        if (next == ':')
+        {
+            int afterColon = SkipWhitespace(json, nextIdx + 1);
+            return afterColon < json.Length && IsValidJsonValueStart(json[afterColon]);
+        }
+
+        if (next == ',')
+        {
+            int afterComma = SkipWhitespace(json, nextIdx + 1);
+            return afterComma < json.Length && (IsValidJsonValueStart(json[afterComma]) || json[afterComma] is '}' or ']');
+        }
+
+        return false;
+    }
+
+    private static int SkipWhitespace(string s, int index)
+    {
+        while (index < s.Length && char.IsWhiteSpace(s[index]))
+        {
+            index++;
+        }
+        return index;
+    }
+
+    private static bool IsValidJsonValueStart(char c) =>
+        c is '"' or '{' or '[' or '-' or 't' or 'f' or 'n' || char.IsDigit(c);
 
     public static int? FindDiffPosition(string? patch, int targetLine)
     {
