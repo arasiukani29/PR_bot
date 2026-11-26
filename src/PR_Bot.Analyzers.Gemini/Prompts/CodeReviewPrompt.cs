@@ -101,11 +101,12 @@ public static class CodeReviewPrompt
            - ONE FINDING PER DEFECT: Never report the same code line under multiple categories. If a defect touches multiple areas, classify it strictly under the highest-priority category above.
 
         16. DEFECT RECONCILIATION & ZERO-FALSE-RESOLUTION POLICY:
-           - DEFAULT TO 'still_active': You are evaluated on preventing false approvals and premature resolutions. Every previous defect is STILL ACTIVE by default.
-           - PROVE THE FIX BEFORE RESOLVING: You are STRICTLY FORBIDDEN from marking a defect as "resolved" unless you see concrete code changes in the diff that explicitly corrected the reported problem.
-           - QUOTE THE EXACT CURRENT LINE: When marking any defect as "resolved", you MUST quote the exact current line(s) from FULL FILE CONTEXT or GIT UNIFIED DIFF in "resolution_note". If the original buggy code still appears in the file, you are STRICTLY FORBIDDEN from marking it "resolved".
-           - UNTOUCHED CODE = STILL ACTIVE: If the developer did not modify the code for a defect, or if the original problem still persists, you MUST mark it as "still_active" with a note explaining that no fix was applied.
-           - NEVER EXCUSE EXISTING DEFECTS: Never mark a defect as "resolved" simply because you consider the code "acceptable" or because surrounding code has other attributes. If the specific issue reported previously has not been explicitly fixed by new code, it remains "still_active".
+           - DEFAULT TO 'still_active': You are evaluated on preventing false approvals and premature resolutions. Every previous defect is STILL ACTIVE by default unless the current code proves it is gone.
+           - INSPECT CURRENT EXECUTABLE CODE (PR-LEVEL DIFF AWARENESS): The diff provided is the full PR diff (base branch vs current head), NOT a commit-by-commit diff. When a developer fixes or deletes a bug in a follow-up commit (especially in a file added in this PR), the current file simply shows the updated code without `-` markers from the prior commit. Do NOT mark a defect as "still_active" merely because you do not see `-` diff markers for the prior bug.
+           - VERIFY AGAINST THE CURRENT FILE BEFORE RESOLVING: Inspect the current code in FULL FILE CONTEXT / GIT UNIFIED DIFF around the reported file and location (accounting for minor line shifts).
+             * If the original buggy/vulnerable code still appears in the file, or the fix is incomplete, you MUST mark it as "still_active".
+             * If the original buggy/vulnerable code has been removed or replaced with a valid fix and is NO LONGER present in the current file, mark it as "resolved" and quote the exact current line(s) (or explain what offending code was removed) in "resolution_note".
+           - NEVER EXCUSE EXISTING DEFECTS: Never mark a defect as "resolved" simply because you consider the code "acceptable" or because surrounding code has other attributes. If the specific issue reported previously still exists in the current code, it remains "still_active".
            - Populate the "defect_reconciliations" array for EVERY prior defect.
            - MANDATORY INDEPENDENT PASS FOR NEW BUGS: Even when "defect_reconciliations" has active prior defects, you MUST still perform a complete, independent line-by-line audit of ALL changed lines across ALL files and report EVERY new bug in "file_reviews". Never skip or cut short "file_reviews" because prior defects exist.
 
@@ -250,10 +251,10 @@ public static class CodeReviewPrompt
                - Task B ("file_reviews"): Independently inspect EVERY changed line and function in the diff above and report ALL new bugs across all files. Even if Task A has active defects, you MUST still complete Task B in full—never omit new findings from "file_reviews".
             2. STRICT DEFECT RECONCILIATION (DEFAULT = "still_active"):
                - For every defect listed under PREVIOUS ACTIVE DEFECTS:
-               - Did the developer write new code in this commit that explicitly fixed the exact issue described?
-               - If YES: set status to "resolved" and explain the exact code fix in "resolution_note".
-               - If NO (code was untouched, fix is incomplete, or defect still exists): you MUST set status to "still_active" and note that the issue remains unfixed.
-               - ZERO FALSE RESOLUTIONS: Never mark "resolved" unless you see the concrete code fix.
+               - Inspect the current executable code in that file (note: the diff is PR-wide, so a fix or deletion in a follow-up commit appears as the current state of the file, even without `-` markers).
+               - If the original buggy/vulnerable code is NO LONGER present in the current file (it was removed or replaced by a valid fix): set status to "resolved" and quote the current fixed code or explain what was removed in "resolution_note".
+               - If the original buggy/vulnerable code still exists in the current file or the fix is incomplete: you MUST set status to "still_active" and note that the issue remains unfixed.
+               - ZERO FALSE RESOLUTIONS: Never mark "resolved" if the original defect still exists in the current code.
             2. Systematically inspect EVERY changed line and function in the diff against all 5 review pillars (Security, Reliability/Crashes, Input Validation, Performance, Maintainability).
             3. MULTI-FILE AUDIT: When multiple files are included in this diff payload, audit EVERY file thoroughly. Never stop after reviewing the first file.
             4. ZERO-WITHHOLDING RULE: Return ALL findings across all priority levels in this single review pass. Do not stop after 1 or 2 findings. Report every defect discovered.
