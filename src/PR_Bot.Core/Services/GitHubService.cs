@@ -415,8 +415,6 @@ public sealed class GitHubService : IGitHubService
             bool aiSaysStillActive = priorMatch != null && string.Equals(priorMatch.ReconciliationStatus, "still_active", StringComparison.OrdinalIgnoreCase);
 
             // Check if the lines around commentLine were modified in the LATEST commit (or PR patch if commit diff unavailable)
-            // Allow a wider line-shift window (±15) for AI-verified resolutions because earlier commits in the PR
-            // may have added/deleted lines above the comment, shifting its line number from the original marker.
             bool lineWasModified;
             bool lineModifiedNearAiResolution;
             if (headCommitPatches != null)
@@ -433,24 +431,27 @@ public sealed class GitHubService : IGitHubService
                         Patch = commitFilePatch
                     }.GetChangedOrDeletedLines();
                     lineWasModified = commitChangedLines.Any(l => Math.Abs(l - commentLine) <= 3);
-                    lineModifiedNearAiResolution = commitChangedLines.Any(l => Math.Abs(l - commentLine) <= 15);
+                    lineModifiedNearAiResolution = commitChangedLines.Any(l => Math.Abs(l - commentLine) <= 20);
                 }
                 else
                 {
-                    // File was not modified in the latest commit; if GitHub already marked the thread outdated
-                    // (Position == null) from an earlier commit in this PR, still allow AI verification.
                     lineWasModified = comment.Position == null;
                     lineModifiedNearAiResolution = lineWasModified;
                 }
             }
             else
             {
-                var prChangedLines = changedFile?.Patch != null ? changedFile.GetChangedOrDeletedLines() : [];
+                var prLines = changedFile?.Patch != null ? changedFile.GetChangedOrDeletedLines() : [];
                 lineWasModified = (comment.Position == null) ||
-                                  prChangedLines.Any(l => Math.Abs(l - commentLine) <= 3);
+                                  prLines.Any(l => Math.Abs(l - commentLine) <= 3);
                 lineModifiedNearAiResolution = (comment.Position == null) ||
-                                               prChangedLines.Any(l => Math.Abs(l - commentLine) <= 15);
+                                               prLines.Any(l => Math.Abs(l - commentLine) <= 20);
             }
+
+            // Also check the PR-wide diff for AI-verified resolutions so fixes made in earlier commits
+            // (not just the single latest commit) are still recognized.
+            var prChangedLines = changedFile?.Patch != null ? changedFile.GetChangedOrDeletedLines() : [];
+            bool prLineModifiedNearAiResolution = prChangedLines.Any(l => Math.Abs(l - commentLine) <= 20);
 
             // Check if defect is still reported in current review findings (by line proximity or matching title in the same file)
             bool sameTitleInFile = priorMatch != null &&
@@ -464,14 +465,16 @@ public sealed class GitHubService : IGitHubService
                 c.FilePath.Equals(comment.Path, StringComparison.OrdinalIgnoreCase) &&
                 Math.Abs(c.Line - commentLine) <= 10);
 
-            // Guard against AI hallucinations: trust aiSaysResolved if the code around commentLine was modified
-            // (allowing ±15 lines for line shifts from earlier commits) OR GitHub already marked the comment outdated.
-            bool aiSaysResolved = priorMatch?.IsResolved == true && (lineModifiedNearAiResolution || comment.Position == null);
+            // Trust AI's explicit "resolved" verdict if the current scan did not re-detect the same defect title
+            // and the code near the comment was modified in the PR diff (or latest commit) or marked outdated by GitHub.
+            bool aiSaysResolved = priorMatch?.IsResolved == true &&
+                                  !sameTitleInFile &&
+                                  (lineModifiedNearAiResolution || prLineModifiedNearAiResolution || comment.Position == null);
             if (priorMatch?.IsResolved == true && !aiSaysResolved && !isFileRemoved)
             {
                 _logger.LogWarning(
-                    "Rejecting AI 'resolved' claim for comment #{CommentId} on {Path}:{Line} (lineWasModified={Modified}).",
-                    comment.Id, comment.Path, commentLine, lineWasModified);
+                    "Rejecting AI 'resolved' claim for comment #{CommentId} on {Path}:{Line} (lineWasModified={Modified}, sameTitleInFile={SameTitle}).",
+                    comment.Id, comment.Path, commentLine, lineWasModified, sameTitleInFile);
                 priorMatch.IsResolved = false;
                 priorMatch.ResolutionExplanation = null;
             }

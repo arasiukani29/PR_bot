@@ -469,19 +469,22 @@ public sealed class GeminiReviewAnalyzer : IReviewAnalyzer
                         int? fLine = item.TryGetProperty("line", out var lineProp) && lineProp.TryGetInt32(out var lVal) ? lVal : null;
                         if (!string.IsNullOrWhiteSpace(fName))
                         {
-                            priorDefect = context.PriorDefects.FirstOrDefault(d =>
-                                d.FilePath.Equals(fName, StringComparison.OrdinalIgnoreCase) &&
-                                (!fLine.HasValue || Math.Abs(d.Line - fLine.Value) <= 10));
+                            var fileDefects = context.PriorDefects
+                                .Where(d => d.FilePath.Equals(fName, StringComparison.OrdinalIgnoreCase))
+                                .ToList();
+
+                            priorDefect = fLine.HasValue
+                                ? fileDefects
+                                    .Where(d => Math.Abs(d.Line - fLine.Value) <= 30)
+                                    .OrderBy(d => Math.Abs(d.Line - fLine.Value))
+                                    .FirstOrDefault()
+                                : fileDefects.FirstOrDefault();
                         }
                     }
 
                     if (priorDefect != null)
                     {
-                        bool noteContradictsResolved = !string.IsNullOrWhiteSpace(note) &&
-                            (note.Contains("STILL ACTIVE", StringComparison.OrdinalIgnoreCase) ||
-                             note.Contains("remains unfixed", StringComparison.OrdinalIgnoreCase));
-
-                        if (status.Equals("resolved", StringComparison.OrdinalIgnoreCase) && !noteContradictsResolved)
+                        if (status.Equals("resolved", StringComparison.OrdinalIgnoreCase))
                         {
                             priorDefect.ReconciliationStatus = "resolved";
                             priorDefect.IsResolved = true;

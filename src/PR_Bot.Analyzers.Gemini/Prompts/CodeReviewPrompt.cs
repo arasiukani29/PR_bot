@@ -106,6 +106,7 @@ public static class CodeReviewPrompt
            - VERIFY AGAINST THE CURRENT FILE BEFORE RESOLVING: Inspect the current code in FULL FILE CONTEXT / GIT UNIFIED DIFF around the reported file and location (accounting for minor line shifts).
              * If the original buggy/vulnerable code still appears in the file, or the fix is incomplete, you MUST mark it as "still_active".
              * If the original buggy/vulnerable code has been removed or replaced with a valid fix and is NO LONGER present in the current file, mark it as "resolved" and quote the exact current line(s) (or explain what offending code was removed) in "resolution_note".
+             * If the defect was resolved by fixing a called helper, caller, or validation in another file of this PR so the bug is no longer reachable, mark it as "resolved" and explain the cross-file fix in "resolution_note".
            - NEVER EXCUSE EXISTING DEFECTS: Never mark a defect as "resolved" simply because you consider the code "acceptable" or because surrounding code has other attributes. If the specific issue reported previously still exists in the current code, it remains "still_active".
            - Populate the "defect_reconciliations" array for EVERY prior defect.
            - MANDATORY INDEPENDENT PASS FOR NEW BUGS: Even when "defect_reconciliations" has active prior defects, you MUST still perform a complete, independent line-by-line audit of ALL changed lines across ALL files and report EVERY new bug in "file_reviews". Never skip or cut short "file_reviews" because prior defects exist.
